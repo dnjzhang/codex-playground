@@ -1,2 +1,3 @@
-# jupyter-sandbox
-Sandbox for Jupyter notebook code 
+# Codex playground
+Sandbox to exercise Codex functionalities
+
