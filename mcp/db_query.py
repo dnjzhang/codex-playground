@@ -32,6 +32,7 @@ def query_user_table(where_clause: str = "") -> List[tuple]:
     Returns:
         List of rows returned from the query.
     """
+
     # Determine connection parameters from environment variables
     user = os.getenv("ORACLE_USER")
     password = os.getenv("ORACLE_PASSWORD")
