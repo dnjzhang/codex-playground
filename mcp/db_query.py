@@ -23,18 +23,30 @@ def readme() -> str:
         return f.read()
 
 @mcp.tool()
-def query_user_table(connection_str: str, where_clause: str = "") -> List[tuple]:
+def query_user_table(where_clause: str = "") -> List[tuple]:
     """Query the Oracle users table.
 
     Args:
-        connection_str: Oracle connection string in the form
-            'user/password@host:port/service'.
         where_clause: Optional SQL where clause (without the word WHERE).
 
     Returns:
         List of rows returned from the query.
     """
-    connection = oracledb.connect(connection_str)
+
+    # Determine connection parameters from environment variables
+    user = os.getenv("ORACLE_USER")
+    password = os.getenv("ORACLE_PASSWORD")
+    host = os.getenv("ORACLE_HOST")
+    port = os.getenv("ORACLE_PORT", "1521")
+    service = os.getenv("ORACLE_SERVICE")
+
+    if not all([user, password, host, service]):
+        raise ValueError(
+            "Missing Oracle DB connection environment variables."
+        )
+
+    dsn = oracledb.makedsn(host, port, service_name=service)
+    connection = oracledb.connect(user=user, password=password, dsn=dsn)
     cursor = connection.cursor()
 
     query = "SELECT * FROM user_def"
