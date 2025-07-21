@@ -15,7 +15,7 @@ mcp.prompt = (
 )
 
 # Expose the repository README file as a resource
-@mcp.resource()
+@mcp.resource("file:///readme")
 def readme() -> str:
     """Return the contents of the repository README file."""
     readme_path = os.path.join(os.path.dirname(__file__), "..", "README.md")
@@ -40,12 +40,15 @@ def query_user_table(where_clause: str = "") -> List[tuple]:
     port = os.getenv("ORACLE_PORT", "1521")
     service = os.getenv("ORACLE_SERVICE")
 
+    print(f"Connection parameters: user={user}, host={host}, port={port}, service={service}")
+
     if not all([user, password, host, service]):
         raise ValueError(
             "Missing Oracle DB connection environment variables."
         )
 
     dsn = oracledb.makedsn(host, port, service_name=service)
+    print(f"Connecting to Oracle DB at {dsn}")
     connection = oracledb.connect(user=user, password=password, dsn=dsn)
     cursor = connection.cursor()
 
