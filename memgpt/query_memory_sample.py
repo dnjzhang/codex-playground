@@ -26,33 +26,17 @@ def print_message(message):
     elif message.message_type == "user_message":
         print("👤 User Message: " + message.content)
 
-agent_state = client.agents.create(
-    name="simple_agent",
-    memory_blocks=[
-        {
-          "label": "human",
-          "value": "My name is Charles",
-          "limit": 10000 # character limit
-        },
-        {
-          "label": "persona",
-          "value": "You are a helpful assistant and you always use emojis"
-        }
-    ],
-    model="openai/gpt-4o-mini",
-    embedding="openai/text-embedding-3-small"
+
+agent_id = "agent-f30d8da9-22fd-4396-bd1c-b9ca36141b11";
+memory_block=client.agents.blocks.retrieve(
+    agent_id=agent_id,
+    block_label="human"
 )
 
-response = client.agents.messages.create(
-    agent_id=agent_state.id,
-    messages=[
-        {
-            "role": "user",
-            "content": "hows it going????"
-        }
-    ]
-)
+print(memory_block)
 
-for message in response.messages:
-    print_message(message)
+print("Agent list:")
+agents = client.agents.list()          # supports filters like name=..., tags=[...], limit=..., after=...
+for a in agents:
+    print(f"{a.id}  {a.name}  (created {a.created_at})")
 
