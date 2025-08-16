@@ -40,3 +40,9 @@ agents = client.agents.list()          # supports filters like name=..., tags=[.
 for a in agents:
     print(f"{a.id}  {a.name}  (created {a.created_at})")
 
+source_id='source-ada61b79-c907-4918-bfe5-75a0904c684e'
+passages = client.sources.passages.list(
+    source_id=source_id,
+)
+print(f"Number passages loaded: {len(passages)}")
+print(f"Passages: {passages[1]}")
