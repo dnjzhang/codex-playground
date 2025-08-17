@@ -57,6 +57,9 @@ def dump_known_blocks(client: Letta, agent_id: str):
     if not tried_any:
         print("(no blocks found or this SDK/server doesn’t expose block listing)")
 
+    print("\nAttached sources:")
+    print(get_attached_source_ids(client, agent_id))
+
 # ---------- Commands ----------
 
 def cmd_list(client: Letta, _args):
@@ -70,6 +73,36 @@ def cmd_list(client: Letta, _args):
         return
     for a in agents:
         print_agent_row(a)
+
+def get_attached_source_ids(client, agent_id):
+    # Try agents.sources.list(...)
+    try:
+        if hasattr(client.agents, "sources") and hasattr(client.agents.sources, "list"):
+            links = client.agents.sources.list(agent_id=agent_id)
+            out = []
+            for x in links or []:
+                sid = getattr(x, "source_id", None) or getattr(x, "id", None)
+                name= getattr(x, "name", None) or getattr(x, "source_name", None)
+                if sid: out.append(sid+"/" + name)
+            if out: return out
+    except Exception:
+        pass
+    # Fallback: look on the agent object
+
+    try:
+        a = client.agents.retrieve(agent_id=agent_id)
+    except Exception:
+        a = None
+    if a is not None:
+        for key in ("source_ids", "knowledge_source_ids", "attached_source_ids", "sources"):
+            val = getattr(a, key, None) if not isinstance(a, dict) else a.get(key)
+            if val:
+                # normalize to list of strings when possible
+                if isinstance(val, list):
+                    return [str(v.get("id") if isinstance(v, dict) else v) for v in val]
+                return [str(val)]
+    return []
+
 
 def cmd_dump(client: Letta, args):
     agent_id = args.agent_id
@@ -105,6 +138,7 @@ def cmd_dump(client: Letta, args):
     print(f"Updated:     {fmt_dt(getattr(agent, 'updated_at', ''))}")
 
     dump_known_blocks(client, agent_id)
+
 
 # ---------- Main ----------
 

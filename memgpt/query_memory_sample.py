@@ -46,3 +46,19 @@ passages = client.sources.passages.list(
 )
 print(f"Number passages loaded: {len(passages)}")
 print(f"Passages: {passages[1]}")
+
+
+
+from letta_client import Letta, MessageCreate, TextContent
+
+client = Letta(base_url="http://localhost:8283")
+
+AGENT_ID = "agent-bee6c1a7-0aba-41af-86a4-5185899b092b"  # an ID that shows up in client.agents.list()
+
+resp = client.agents.messages.create(
+    agent_id=AGENT_ID,
+    messages=[MessageCreate(role="user", content=[TextContent(text="Wake up and say hi!")])]
+)
+print(resp.messages[-1].content)
+
+
