@@ -1,5 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from datetime import date
 
 
 def plot_cd_maturities(csv_path: str) -> None:
@@ -15,10 +17,38 @@ def plot_cd_maturities(csv_path: str) -> None:
 
     ax = monthly_totals.plot.bar(legend=False)
     ax.set_xlabel("Month")
-    ax.set_ylabel("Total $ Matured")
-    ax.set_title("CD Maturity Totals per Month")
-    ax.bar_label(ax.containers[0], fmt="${:,.0f}", padding=3)
-    plt.xticks(rotation=45)
+    ax.set_ylabel("Total $ Matured (K)")
+    ax.set_title(f"CD Maturity Totals per Month as of {date.today().isoformat()}")
+
+    # Center labels inside each bar and skip zeros for readability
+    bars = ax.containers[0]
+    labels = [
+        f"${bar.get_height() / 1000:,.0f}K" if bar.get_height() > 0 else ""
+        for bar in bars
+    ]
+
+    # Increase headroom so top labels don't collide with the border
+    ax.margins(y=0.10)
+    # Add one full bar-width of empty space at both ends
+    n_bars = len(bars)
+    if n_bars:
+        ax.set_xlim(-1, n_bars)
+
+    ax.bar_label(
+        bars,
+        labels=labels,
+        label_type="edge",  # place labels at top edge of bars
+        padding=3,
+        color="black",
+        fontsize=9,
+        rotation=0,  # keep amount labels horizontal for readability
+    )
+
+    # Format y-axis in thousands (K)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: f"${x/1000:,.0f}K"))
+
+    # Format x-axis as YYYY-MM for clarity and keep labels centered on bars
+    ax.set_xticklabels([d.strftime("%Y-%m") for d in monthly_totals.index], rotation=45, ha="right")
     plt.tight_layout()
     plt.show()
 
