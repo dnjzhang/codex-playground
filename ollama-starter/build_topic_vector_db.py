@@ -9,7 +9,7 @@ This script scans a topic folder for PDFs, loads + splits them using
 LangChain loaders and text splitter, and persists a Chroma DB per topic.
 
 Requirements (install under ollama-starter):
-  pip install -r ollama-starter/requirements.txt
+  pip install -r ollama-starter/requireCan ments.txt
 
 Ollama notes:
   - Ensure Ollama is running locally and the embedding model is available

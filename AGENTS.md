@@ -1,36 +1,24 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Multi-project sandbox; each subfolder is self-contained.
-- Key directories: `financial/` (CSV data, plots), `treasury/` (Treasury scripts), `youtube_transcript/` (transcript tools), `mcp/`, `memgpt/`, `langmem_sample/`, `ollama-starter/` (LLM demos; has `requirements.txt`).
-- Python scripts live directly under each folder; PDFs and assets stay alongside their code.
+Treat each top-level folder as an independent project: `financial/` handles CSV-backed analytics and plots, `treasury/` focuses on Treasury scripts, `youtube_transcript/` manages transcript tooling, `mcp/` and `memgpt/` host agent experiments, `langmem_sample/` explores memory techniques, and `ollama-starter/` ships LLM demos with its own `requirements.txt`. Place new Python modules directly inside the relevant directory, keep PDFs or sample data alongside the code they describe, and avoid cross-project imports unless absolutely necessary.
 
 ## Build, Test, and Development Commands
-- Python environment (recommended 3.11+):
-  - Create venv: `python -m venv .venv`
-  - Activate: `source .venv/bin/activate`
-- Install deps per subproject as needed, e.g.: `pip install -r ollama-starter/requirements.txt`.
-- Run scripts directly, e.g.:
-  - `python financial/cd_maturity_plot.py`
-  - `python treasury/estimate_yields.py`
-  - `python youtube_transcript/youtube_transcript.py`
+- `python -m venv .venv` — create a local virtual environment (target Python 3.11+).
+- `source .venv/bin/activate` — activate that environment before installing packages.
+- `pip install -r ollama-starter/requirements.txt` — install dependencies for the Ollama demo; repeat per project as needed.
+- `python financial/cd_maturity_plot.py` — run the CD maturity plot pipeline.
+- `python treasury/estimate_yields.py` — estimate Treasury yields with the latest assumptions.
+- `python youtube_transcript/youtube_transcript.py` — pull and process YouTube transcripts.
 
 ## Coding Style & Naming Conventions
-- Python: PEP 8, 4-space indentation, 88–100 column soft limit.
-- Names: `snake_case` for files/functions, `CamelCase` for classes. Prefer descriptive module names (e.g., `letta_memory_inspector.py`).
-- Formatting/linting (optional but encouraged): `black .` and `ruff .` before commits.
+Adhere to PEP 8 with 4-space indentation and an 88–100 character soft limit. Use `snake_case` for files, modules, and functions, and reserve `CamelCase` for classes. Favor descriptive filenames like `letta_memory_inspector.py`. Run `black .` and `ruff .` before sharing code to catch formatting or lint issues early.
 
 ## Testing Guidelines
-- No global test harness yet. If adding tests, use `pytest` and name files `test_*.py` near the code or under `tests/` within the subproject.
-- Keep tests fast and data-light; mock network and external tools.
-- Run: `pytest -q` from the repo root or subproject.
+Use `pytest` for new tests and name files `test_*.py`, either adjacent to the code or within a local `tests/` folder. Keep tests deterministic, light on data, and mock any external services or network calls. Execute suites from the repo root (or project directory) with `pytest -q`, and mention relevant output when submitting changes.
 
 ## Commit & Pull Request Guidelines
-- Commits: imperative mood, concise subject (<72 chars). Prefix with scope when useful, e.g., `[financial] Add CD maturity plot`.
-- Body explains “why” and notable decisions; include sample command/output when changing CLIs.
-- PRs include: clear description, affected folder(s), run instructions, data requirements, and screenshots/logs when applicable. Link related issues.
+Write commit subjects in the imperative mood under 72 characters, optionally prefixed with a scope tag such as `[financial] Add CD maturity plot`. Describe the reasoning, trade-offs, and CLI samples in the body when they help reviewers. Pull requests should summarize the change, list affected directories, document setup or data requirements, and include screenshots or logs when they clarify results. Link associated issues or tasks to give maintainers quick context.
 
 ## Security & Configuration Tips
-- Do not commit secrets or large datasets. Use local `.env` files and keep them in `.gitignore`.
-- Clearly document any external service prerequisites (e.g., Ollama/Chroma) in the subproject README or script docstring, including setup and ports.
-
+Keep secrets and large datasets out of version control; rely on local `.env` files already ignored by Git. Document any required external services (for example, Ollama or Chroma) in the relevant README or script docstring, including ports, environment variables, and startup commands.

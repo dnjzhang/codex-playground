@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -5,10 +7,37 @@ from datetime import date
 
 
 def plot_cd_maturities(csv_path: str) -> None:
-    """Plot total CD amounts maturing each month."""
-    df = pd.read_csv(csv_path, header=None, usecols=[0, 4], names=["date", "amount"])
-    df["date"] = pd.to_datetime(df["date"])
-    df["amount"] = df["amount"].replace(r"[\$,]", "", regex=True).astype(float)
+    """Plot total CD amounts maturing each month.
+
+    Improvements:
+    - Ignore rows that do not start with a parseable date (e.g., headers, totals).
+    - Keep the script executable via shebang so it can be run directly.
+    """
+
+    # Read only the first (date) and 5th (amount) columns as strings,
+    # since some files may have headers, blanks, or subtotal rows.
+    df = pd.read_csv(
+        csv_path,
+        header=None,
+        usecols=[0, 4],
+        names=["date_raw", "amount_raw"],
+        dtype=str,
+    )
+
+    # Parse dates; non-date rows (headers, blanks) become NaT and are dropped.
+    df["date"] = pd.to_datetime(df["date_raw"], errors="coerce")
+
+    # Normalize amount text like "$22,000.00" -> 22000.0; drop unparseable.
+    cleaned = df["amount_raw"].str.replace(r"[\$,]", "", regex=True)
+    df["amount"] = pd.to_numeric(cleaned, errors="coerce")
+
+    # Keep only valid date/amount rows
+    df = df.dropna(subset=["date", "amount"]).copy()
+
+    if df.empty:
+        print("No valid date/amount rows found. Nothing to plot.")
+        return
+
     df.set_index("date", inplace=True)
 
     monthly_totals = df.resample("M").sum()

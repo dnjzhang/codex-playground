@@ -7,3 +7,5 @@ langchain-chroma
 langgraph
 pypdf
 pandas
+beautifulsoup4
+markdownify
