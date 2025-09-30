@@ -18,17 +18,17 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from typing import Dict, List, TypedDict
-import json
 
 from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings, ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
-
-from langgraph.graph import StateGraph, END
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables.graph import MermaidDrawMethod
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langgraph.graph import END, StateGraph
 
 
 class QAState(TypedDict):
@@ -136,6 +136,56 @@ def build_qa_graph(chat_model: str, retriever, system_preamble: str | None = Non
     return graph.compile()
 
 
+def export_graph_diagram(app, output_path: str, *, debug: bool = False) -> str:
+    """Render the compiled LangGraph as a PNG diagram."""
+
+    compiled_graph = app.get_graph()
+
+    directory = os.path.dirname(output_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    png_path = output_path if output_path.lower().endswith(".png") else f"{output_path}.png"
+    if debug and png_path != output_path:
+        print(f"[debug] graph diagram path updated to {png_path} (PNG required)")
+
+    try:
+        compiled_graph.draw_mermaid_png(
+            output_file_path=png_path,
+            draw_method=MermaidDrawMethod.API,
+        )
+    except Exception as exc:  # noqa: BLE001
+        fallback_path = f"{os.path.splitext(png_path)[0]}.mmd"
+        fallback_error = None
+        try:
+            mermaid_diagram = compiled_graph.draw_mermaid()
+            with open(fallback_path, "w", encoding="utf-8") as diagram_file:
+                diagram_file.write(mermaid_diagram)
+        except Exception as fallback_exc:  # noqa: BLE001
+            fallback_error = fallback_exc
+
+        if fallback_error:
+            if debug:
+                print(
+                    "[debug] failed to save Mermaid fallback diagram: "
+                    f"{fallback_error}"
+                )
+            raise RuntimeError(
+                "Failed to render PNG diagram and unable to save Mermaid fallback"
+            ) from exc
+
+        if debug:
+            print(f"[debug] Mermaid fallback saved to {fallback_path}")
+        raise RuntimeError(
+            (
+                "Failed to render PNG diagram: "
+                f"{exc}. Mermaid fallback saved to {fallback_path}"
+            )
+        ) from exc
+
+    return png_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Query/chat with a per-topic Chroma DB using a simple LangGraph QA pipeline.")
     parser.add_argument("--topic-name", required=True, help="Topic name used when building the DB")
@@ -151,6 +201,11 @@ def main() -> None:
     parser.add_argument("--show-sources", action="store_true", help="Print brief source info after each answer")
     parser.add_argument("--debug", action="store_true", help="Print debug info about DB + retrieval")
     parser.add_argument("--inspect", default=None, help="Inspect retrieval only: print top docs and scores for a query, then exit")
+    parser.add_argument(
+        "--graph-diagram",
+        default=None,
+        help="Optional path to save the compiled LangGraph structure as a PNG image",
+    )
 
     args = parser.parse_args()
 
@@ -166,6 +221,18 @@ def main() -> None:
     )
 
     app = build_qa_graph(chat_model=args.chat_model, retriever=retriever)
+
+    if args.graph_diagram:
+        try:
+            png_path = export_graph_diagram(
+                app,
+                args.graph_diagram,
+                debug=args.debug,
+            )
+            if args.debug:
+                print(f"[debug] graph diagram saved to {png_path}")
+        except Exception as exc:
+            print(f"[warn] failed to save graph diagram: {exc}")
 
     if args.debug:
         print("[debug] topic:", args.topic_name)
