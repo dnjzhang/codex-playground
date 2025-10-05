@@ -12,7 +12,7 @@ Examples:
 Notes:
   - Auto-detects the embedding model from the topic DB metadata when available
   - Requires Ollama running locally with the chosen chat model available
-  - DB should be built with build_topic_vector_db.py
+  - DB should be built with topic-curator.py
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def build_retriever(
     lambda_mult: float | None = None,
 ):
     persist_dir = os.path.join(persist_root, topic_name)
-    collection = collection_name or f"topic_{topic_name}"
+    collection = collection_name or topic_name
 
     # Auto-detect embedding model from metadata when embedding_model is None or 'auto'
     if not embedding_model or embedding_model == "auto":
@@ -247,8 +247,16 @@ def export_graph_diagram(app, output_path: str, *, debug: bool = False) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Query/chat with a per-topic Chroma DB using a simple LangGraph QA pipeline.")
     parser.add_argument("--topic-name", required=True, help="Topic name used when building the DB")
-    parser.add_argument("--persist-root", default=os.path.join("ollama-starter", "chroma_topics"), help="Root directory where topic DBs are stored")
-    parser.add_argument("--collection-name", default=None, help="Optional Chroma collection name; defaults to topic_<topic>")
+    parser.add_argument(
+        "--persist-root",
+        default=".chroma",
+        help="Root directory where topic DBs are stored",
+    )
+    parser.add_argument(
+        "--collection-name",
+        default=None,
+        help="Optional Chroma collection name; defaults to the topic name",
+    )
     parser.add_argument("--embedding-model", default="auto", help="Embedding model to use; 'auto' tries to read from DB metadata")
     parser.add_argument("--chat-model", default="llama3.2", help="Ollama chat model to generate answers")
     parser.add_argument("--k", type=int, default=10, help="Top-k documents to retrieve")

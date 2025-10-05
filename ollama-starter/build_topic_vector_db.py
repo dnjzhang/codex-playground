@@ -149,7 +149,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build per-topic Chroma DB from PDFs using Ollama embeddings.")
     parser.add_argument("--topic-dir", required=True, help="Path to topic directory containing PDFs")
     parser.add_argument("--topic-name", default=None, help="Optional explicit topic name; defaults to folder name")
-    parser.add_argument("--persist-root", default=os.path.join("ollama-starter", "chroma_topics"), help="Root directory where topic DBs are stored")
+    parser.add_argument("--persist-root", default=os.path.join("./", "chroma_topics"), help="Root directory where topic DBs are stored")
     parser.add_argument("--collection-name", default=None, help="Optional Chroma collection name; defaults to topic_<topic>")
     parser.add_argument("--embedding-model", default="mxbai-embed-large", help="Ollama embedding model (e.g., mxbai-embed-large, nomic-embed-text)")
     parser.add_argument("--chunk-size", type=int, default=1200, help="Text splitter chunk size")
