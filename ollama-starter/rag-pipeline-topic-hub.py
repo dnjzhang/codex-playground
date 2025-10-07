@@ -11,12 +11,14 @@ Examples:
   python ollama-starter/rag-pipeline-topic-hub.py \
       --topic-name spring-boot \
       --chat-provider oci \
-      --embedding-provider oci
+      --embedding-provider oci \
+      --user-id alice
 
 Notes:
   - Auto-detects embedding provider/model from topic metadata when available
   - Supports Ollama (default) and OCI Generative AI for chat + embeddings
   - Build topic vectors with topic-curator.py to ensure metadata compatibility
+  - Conversation memory persists per user ID when running multiple turns
 """
 
 from __future__ import annotations
@@ -30,10 +32,12 @@ from typing import Dict, List, Sequence, Tuple, TypedDict
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.graph import MermaidDrawMethod
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.graph import END, StateGraph
+from langchain_core.messages import BaseMessage
+from langchain_core.chat_history import InMemoryChatMessageHistory
 
 try:
     from langchain_community.chat_models.oci_generative_ai import ChatOCIGenAI
@@ -48,10 +52,11 @@ except ImportError:  # noqa: WPS440 - optional dependency
     OCIGenAIEmbeddings = None  # type: ignore[assignment]
 
 
-class QAState(TypedDict):
+class QAState(TypedDict, total=False):
     question: str
     context: List[Document]
     answer: str
+    history: List[BaseMessage]
 
 
 def _load_db_metadata(persist_dir: str) -> Dict | None:
@@ -346,6 +351,7 @@ def build_qa_graph(
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", system_text),
+            MessagesPlaceholder(variable_name="history"),
             (
                 "human",
                 "Question: {question}\n\nContext:\n{context}\n\nProvide a clear, source-grounded answer.",
@@ -364,7 +370,7 @@ def build_qa_graph(
             )
         else:
             context_docs = docs[:desired_top_n]
-        return {"context": context_docs}
+        return {"context": context_docs, "history": state.get("history", [])}
 
     def generate_node(state: QAState) -> Dict:
         # Join docs into text blocks for the prompt
@@ -372,8 +378,18 @@ def build_qa_graph(
             f"[source: {d.metadata.get('source','?')} p{d.metadata.get('page','?')}]\n{d.page_content}"
             for d in state.get("context", [])
         )
-        answer = chain.invoke({"question": state["question"], "context": context_text})
-        return {"answer": answer, "context": state.get("context", [])}
+        answer = chain.invoke(
+            {
+                "question": state["question"],
+                "context": context_text,
+                "history": state.get("history", []),
+            }
+        )
+        return {
+            "answer": answer,
+            "context": state.get("context", []),
+            "history": state.get("history", []),
+        }
 
     graph = StateGraph(QAState)
     graph.add_node("retrieve", retrieve_node)
@@ -518,6 +534,11 @@ def main() -> None:
         default=None,
         help="Override OCI config profile name",
     )
+    parser.add_argument(
+        "--user-id",
+        default="default",
+        help="Identifier used to scope conversation memory",
+    )
 
     args = parser.parse_args()
 
@@ -530,6 +551,17 @@ def main() -> None:
         rerank_top_n = max(1, math.ceil(args.k / 2))
     else:
         rerank_top_n = max(1, min(args.rerank_top_n, args.k))
+
+    memory_store: Dict[str, InMemoryChatMessageHistory] = {}
+
+    def get_user_memory(user_key: str) -> InMemoryChatMessageHistory:
+        key = user_key or "default"
+        if key not in memory_store:
+            memory_store[key] = InMemoryChatMessageHistory()
+        return memory_store[key]
+
+    user_id = args.user_id or "default"
+    conversation_memory = get_user_memory(user_id)
 
     retriever, rinfo, vector_store = build_retriever(
         topic_name=args.topic_name,
@@ -601,6 +633,7 @@ def main() -> None:
         print("[debug] chat_provider:", rinfo.get("chat_provider"))
         print("[debug] chat_model:", rinfo.get("chat_model"))
         print("[debug] chat_temperature:", args.chat_temperature)
+        print("[debug] user_id:", user_id)
 
     if args.inspect:
         q = args.inspect
@@ -638,9 +671,18 @@ def main() -> None:
         return
 
     def run_once(q: str) -> None:
-        result = app.invoke({"question"})
+        history_messages = list(conversation_memory.messages)
+        state: QAState = {
+            "question": q,
+            "context": [],
+            "answer": "",
+            "history": history_messages,
+        }
+        result = app.invoke(state)
+        answer_raw = result.get("answer", "")
+        answer = answer_raw if isinstance(answer_raw, str) else str(answer_raw)
         print("\n=== Answer ===\n")
-        print(result.get("answer", ""))
+        print(answer)
         if args.show_sources:
             print("\n--- Sources ---")
             context_docs = result.get("context", [])
@@ -657,6 +699,9 @@ def main() -> None:
                         else ""
                     )
                     print(f"- {src} (p{page}){score_info}")
+
+        conversation_memory.add_user_message(q)
+        conversation_memory.add_ai_message(answer)
 
     if args.query:
         run_once(args.query)
