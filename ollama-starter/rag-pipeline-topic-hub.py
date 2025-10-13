@@ -27,7 +27,10 @@ import argparse
 import json
 import math
 import os
-from typing import Dict, List, Sequence, Tuple, TypedDict
+import threading
+import uuid
+from dataclasses import dataclass
+from typing import Any, Dict, List, Sequence, Tuple, TypedDict
 
 from langchain_chroma import Chroma
 from langchain_core.chat_history import InMemoryChatMessageHistory
@@ -44,6 +47,7 @@ from provider_lib import (
     init_embedding_function,
     load_oci_config_data,
 )
+from pydantic import BaseModel, Field
 
 
 class QAState(TypedDict, total=False):
@@ -51,6 +55,216 @@ class QAState(TypedDict, total=False):
     context: List[Document]
     answer: str
     history: List[BaseMessage]
+
+
+@dataclass
+class PipelineConfig:
+    topic_name: str
+    persist_root: str = ".chroma"
+    collection_name: str | None = None
+    embedding_provider: str = "auto"
+    embedding_model: str = "auto"
+    chat_provider: str = "ollama"
+    chat_model: str | None = None
+    chat_temperature: float = 0.0
+    k: int = 10
+    search_type: str = "similarity"
+    lambda_mult: float | None = None
+    rerank_model: str = "BAAI/bge-reranker-base"
+    rerank_top_n: int | None = None
+    oci_config: str = "oci-config.json"
+    oci_endpoint: str | None = None
+    oci_compartment_id: str | None = None
+    oci_auth_profile: str | None = None
+    user_id: str = "default"
+    show_sources: bool = False
+    debug: bool = False
+
+
+@dataclass
+class ChatResult:
+    answer: str
+    sources: List[Dict[str, Any]]
+    context_docs: List[Document]
+
+
+@dataclass
+class SessionRuntime:
+    config: PipelineConfig
+    app: Any
+    conversation_memory: InMemoryChatMessageHistory
+    retriever_info: Dict[str, Any]
+    vector_store: Any
+    reranker: Any
+    rerank_top_n: int
+    resolved_chat_model: str | None
+
+    def run_query(self, question: str) -> ChatResult:
+        history_messages = list(self.conversation_memory.messages)
+        state: QAState = {
+            "question": question,
+            "context": [],
+            "answer": "",
+            "history": history_messages,
+        }
+        if self.config.debug:
+            print("[debug] run_query question:", question)
+            print("[debug] run_query history message count:", len(history_messages))
+        result = self.app.invoke(state)
+        answer_raw = result.get("answer", "")
+        answer = answer_raw if isinstance(answer_raw, str) else str(answer_raw)
+
+        context_docs: List[Document] = result.get("context", []) or []
+        sources: List[Dict[str, Any]] = []
+        if self.config.show_sources:
+            for doc in context_docs:
+                src = doc.metadata.get("source", "?")
+                page = doc.metadata.get("page", "?")
+                rerank_score = doc.metadata.get("rerank_score")
+                similarity_score = doc.metadata.get("similarity_score")
+                source_info: Dict[str, Any] = {
+                    "source": src,
+                    "page": page,
+                }
+                if rerank_score is not None:
+                    source_info["rerank_score"] = float(rerank_score)
+                if similarity_score is not None:
+                    source_info["similarity_score"] = float(similarity_score)
+                sources.append(source_info)
+
+        self.conversation_memory.add_user_message(question)
+        self.conversation_memory.add_ai_message(answer)
+        return ChatResult(answer=answer, sources=sources, context_docs=context_docs)
+
+    def inspect(self, query: str) -> Dict[str, List[Dict[str, Any]]]:
+        docs_scores = self.vector_store.similarity_search_with_score(query, k=self.config.k)
+        top_matches: List[Dict[str, Any]] = []
+        for doc, score in docs_scores or []:
+            doc.metadata["similarity_score"] = float(score)
+            top_matches.append(
+                {
+                    "source": doc.metadata.get("source", "?"),
+                    "page": doc.metadata.get("page", "?"),
+                    "similarity_score": float(score),
+                    "document": doc.page_content,
+                }
+            )
+
+        reranked_matches: List[Dict[str, Any]] = []
+        if self.reranker and docs_scores:
+            docs = [doc for doc, _ in docs_scores]
+            reranked_docs = rerank_documents(query, docs, self.reranker, self.rerank_top_n)
+            for doc in reranked_docs:
+                reranked_matches.append(
+                    {
+                        "source": doc.metadata.get("source", "?"),
+                        "page": doc.metadata.get("page", "?"),
+                        "rerank_score": float(doc.metadata.get("rerank_score", 0.0)),
+                        "similarity_score": float(doc.metadata.get("similarity_score", 0.0)),
+                        "document": doc.page_content,
+                    }
+                )
+
+        return {"top_matches": top_matches, "reranked_matches": reranked_matches}
+
+
+@dataclass
+class ChatSession:
+    session_id: str
+    runtime: SessionRuntime
+
+    def ask(self, question: str) -> ChatResult:
+        return self.runtime.run_query(question)
+
+
+class SessionManager:
+    def __init__(self) -> None:
+        self._sessions: Dict[str, ChatSession] = {}
+        self._lock = threading.Lock()
+
+    def create_session(self, configuration: PipelineConfig) -> ChatSession:
+        runtime = initialize_session(configuration)
+        session_id = uuid.uuid4().hex
+        chat_session = ChatSession(session_id=session_id, runtime=runtime)
+        with self._lock:
+            self._sessions[session_id] = chat_session
+        return chat_session
+
+    def get_session(self, session_id: str) -> ChatSession:
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        return session
+
+
+session_manager = SessionManager()
+
+
+class SessionCreatePayload(BaseModel):
+    topic_name: str = Field(..., description="Topic name used when building the DB")
+    persist_root: str = Field(".chroma", description="Root directory where topic DBs are stored")
+    collection_name: str | None = Field(None, description="Optional Chroma collection name")
+    embedding_provider: str = Field("auto", description="Embedding provider to use")
+    embedding_model: str = Field("auto", description="Embedding model identifier")
+    chat_provider: str = Field("ollama", description="Chat model provider")
+    chat_model: str | None = Field(None, description="Chat model identifier")
+    chat_temperature: float = Field(0.0, description="Sampling temperature for the chat model")
+    k: int = Field(10, description="Top-k documents to retrieve", gt=0)
+    search_type: str = Field("similarity", description="Retrieval search type")
+    lambda_mult: float | None = Field(None, description="Diversity factor for MMR (0-1)")
+    rerank_model: str = Field("BAAI/bge-reranker-base", description="Cross-encoder model to rerank retrieved documents")
+    rerank_top_n: int | None = Field(None, description="Number of reranked documents to send to the chat model", gt=0)
+    oci_config: str = Field("oci-config.json", description="Path to OCI config JSON")
+    oci_endpoint: str | None = Field(None, description="Override OCI service endpoint")
+    oci_compartment_id: str | None = Field(None, description="Override OCI compartment OCID")
+    oci_auth_profile: str | None = Field(None, description="Override OCI config profile name")
+    user_id: str = Field("default", description="Identifier used to scope conversation memory")
+    show_sources: bool = Field(False, description="Include source metadata in responses")
+    debug: bool = Field(False, description="Enable debug logging")
+    graph_diagram: str | None = Field(None, description="Optional path to save the compiled LangGraph structure as a PNG image")
+
+    def to_pipeline_config(self) -> PipelineConfig:
+        return PipelineConfig(
+            topic_name=self.topic_name,
+            persist_root=self.persist_root,
+            collection_name=self.collection_name,
+            embedding_provider=self.embedding_provider,
+            embedding_model=self.embedding_model,
+            chat_provider=self.chat_provider,
+            chat_model=self.chat_model,
+            chat_temperature=self.chat_temperature,
+            k=self.k,
+            search_type=self.search_type,
+            lambda_mult=self.lambda_mult,
+            rerank_model=self.rerank_model,
+            rerank_top_n=self.rerank_top_n,
+            oci_config=self.oci_config,
+            oci_endpoint=self.oci_endpoint,
+            oci_compartment_id=self.oci_compartment_id,
+            oci_auth_profile=self.oci_auth_profile,
+            user_id=self.user_id,
+            show_sources=self.show_sources,
+            debug=self.debug,
+        )
+
+
+class SessionCreateResponseModel(BaseModel):
+    session_id: str
+    topic_name: str
+    chat_provider: str | None = None
+    chat_model: str | None = None
+    rerank_top_n: int
+
+
+class ChatRequestModel(BaseModel):
+    question: str = Field(..., description="User question for the chatbot")
+
+
+class ChatResponseModel(BaseModel):
+    session_id: str
+    answer: str
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def _load_db_metadata(persist_dir: str) -> Dict | None:
@@ -379,9 +593,168 @@ def export_graph_diagram(app, output_path: str, *, debug: bool = False) -> str:
     return png_path
 
 
+def _compute_rerank_top_n(k: int, candidate: int | None) -> int:
+    if candidate is None:
+        return max(1, math.ceil(k / 2))
+    return max(1, min(candidate, k))
+
+
+def initialize_session(config: PipelineConfig) -> SessionRuntime:
+    if config.k <= 0:
+        raise ValueError("--k must be a positive integer")
+    if config.rerank_top_n is not None and config.rerank_top_n <= 0:
+        raise ValueError("--rerank-top-n must be a positive integer when provided")
+
+    rerank_top_n = _compute_rerank_top_n(config.k, config.rerank_top_n)
+
+    retriever, retriever_info, vector_store = build_retriever(
+        topic_name=config.topic_name,
+        persist_root=config.persist_root,
+        embedding_provider=config.embedding_provider,
+        embedding_model=config.embedding_model,
+        collection_name=config.collection_name,
+        k=config.k,
+        search_type=config.search_type,
+        lambda_mult=config.lambda_mult,
+        oci_config=config.oci_config,
+        oci_config_data=None,
+        oci_endpoint=config.oci_endpoint,
+        oci_compartment_id=config.oci_compartment_id,
+        oci_auth_profile=config.oci_auth_profile,
+        debug=config.debug,
+    )
+
+    oci_config_data: Dict[str, str] | None = None
+    if retriever_info.get("embedding_provider") == "oci" or config.chat_provider == "oci":
+        oci_config_data = load_oci_config_data(config.oci_config)
+
+    chat_llm, resolved_chat_model = init_chat_model(
+        config.chat_provider,
+        config.chat_model,
+        temperature=config.chat_temperature,
+        oci_config=config.oci_config,
+        oci_config_data=oci_config_data,
+        oci_endpoint=config.oci_endpoint,
+        oci_compartment_id=config.oci_compartment_id,
+        oci_auth_profile=config.oci_auth_profile,
+    )
+
+    reranker = build_reranker(config.rerank_model)
+
+    app = build_qa_graph(
+        chat_llm,
+        retriever,
+        reranker=reranker,
+        rerank_top_n=rerank_top_n,
+        debug=config.debug,
+    )
+
+    retriever_info["rerank_model"] = config.rerank_model
+    retriever_info["rerank_top_n"] = rerank_top_n
+    retriever_info["chat_provider"] = config.chat_provider
+    retriever_info["chat_model"] = resolved_chat_model
+
+    conversation_memory = InMemoryChatMessageHistory()
+
+    return SessionRuntime(
+        config=config,
+        app=app,
+        conversation_memory=conversation_memory,
+        retriever_info=retriever_info,
+        vector_store=vector_store,
+        reranker=reranker,
+        rerank_top_n=rerank_top_n,
+        resolved_chat_model=resolved_chat_model,
+    )
+
+
+def create_api_app() -> Any:
+    try:
+        from fastapi import Body, FastAPI, HTTPException
+        from fastapi.middleware.cors import CORSMiddleware
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "FastAPI and Pydantic are required to run the API server. "
+            "Install them with `pip install -r requirements.txt`."
+        ) from exc
+
+    api = FastAPI(title="RAG Topic Hub API", version="1.0.0")
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @api.post("/sessions", response_model=SessionCreateResponseModel)
+    def create_session_endpoint(
+        payload: SessionCreatePayload = Body(...),
+    ) -> SessionCreateResponseModel:
+        config = payload.to_pipeline_config()
+        try:
+            session = session_manager.create_session(config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        runtime = session.runtime
+
+        if payload.graph_diagram:
+            try:
+                export_graph_diagram(runtime.app, payload.graph_diagram, debug=config.debug)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to save graph diagram: {exc}",
+                ) from exc
+
+        return SessionCreateResponseModel(
+            session_id=session.session_id,
+            topic_name=config.topic_name,
+            chat_provider=runtime.retriever_info.get("chat_provider"),
+            chat_model=runtime.retriever_info.get("chat_model"),
+            rerank_top_n=runtime.rerank_top_n,
+        )
+
+    @api.post("/sessions/{session_id}/chat", response_model=ChatResponseModel)
+    def chat_endpoint(
+        session_id: str,
+        payload: ChatRequestModel = Body(...),
+    ) -> ChatResponseModel:
+        try:
+            session = session_manager.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Session not found") from exc
+
+        result = session.ask(payload.question)
+
+        return ChatResponseModel(
+            session_id=session_id,
+            answer=result.answer,
+            sources=result.sources,
+        )
+
+    return api
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Query/chat with a per-topic Chroma DB using a simple LangGraph QA pipeline.")
-    parser.add_argument("--topic-name", required=True, help="Topic name used when building the DB")
+    parser.add_argument(
+        "--serve-api",
+        action="store_true",
+        help="Run the RESTful API server instead of the command-line interface",
+    )
+    parser.add_argument(
+        "--api-host",
+        default="127.0.0.1",
+        help="Host interface to bind the RESTful API server",
+    )
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        default=8000,
+        help="Port to bind the RESTful API server",
+    )
+    parser.add_argument("--topic-name", required=False, help="Topic name used when building the DB")
     parser.add_argument(
         "--persist-root",
         default=".chroma",
@@ -471,78 +844,61 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.serve_api:
+        if args.api_port <= 0:
+            parser.error("--api-port must be a positive integer")
+        try:
+            import uvicorn
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise SystemExit(
+                "uvicorn is required to run the API server. "
+                "Install it with `pip install -r requirements.txt`."
+            ) from exc
+        app = create_api_app()
+        uvicorn.run(app, host=args.api_host, port=args.api_port)
+        return
+
     if args.k <= 0:
         parser.error("--k must be a positive integer")
     if args.rerank_top_n is not None and args.rerank_top_n <= 0:
         parser.error("--rerank-top-n must be a positive integer")
 
-    if args.rerank_top_n is None:
-        rerank_top_n = max(1, math.ceil(args.k / 2))
-    else:
-        rerank_top_n = max(1, min(args.rerank_top_n, args.k))
+    if not args.topic_name:
+        parser.error("--topic-name is required unless --serve-api is specified")
 
-    memory_store: Dict[str, InMemoryChatMessageHistory] = {}
-
-    def get_user_memory(user_key: str) -> InMemoryChatMessageHistory:
-        key = user_key or "default"
-        if key not in memory_store:
-            memory_store[key] = InMemoryChatMessageHistory()
-        return memory_store[key]
-
-    user_id = args.user_id or "default"
-    conversation_memory = get_user_memory(user_id)
-
-    retriever, rinfo, vector_store = build_retriever(
+    config = PipelineConfig(
         topic_name=args.topic_name,
         persist_root=args.persist_root,
+        collection_name=args.collection_name,
         embedding_provider=args.embedding_provider,
         embedding_model=args.embedding_model,
-        collection_name=args.collection_name,
+        chat_provider=args.chat_provider,
+        chat_model=args.chat_model,
+        chat_temperature=args.chat_temperature,
         k=args.k,
         search_type=args.search_type,
         lambda_mult=args.lambda_mult,
+        rerank_model=args.rerank_model,
+        rerank_top_n=args.rerank_top_n,
         oci_config=args.oci_config,
-        oci_config_data=None,
         oci_endpoint=args.oci_endpoint,
         oci_compartment_id=args.oci_compartment_id,
         oci_auth_profile=args.oci_auth_profile,
+        user_id=args.user_id or "default",
+        show_sources=args.show_sources,
         debug=args.debug,
     )
 
-    oci_config_data: Dict[str, str] | None = None
-    if rinfo.get("embedding_provider") == "oci" or args.chat_provider == "oci":
-        oci_config_data = load_oci_config_data(args.oci_config)
-
-    chat_llm, resolved_chat_model = init_chat_model(
-        args.chat_provider,
-        args.chat_model,
-        temperature=args.chat_temperature,
-        oci_config=args.oci_config,
-        oci_config_data=oci_config_data,
-        oci_endpoint=args.oci_endpoint,
-        oci_compartment_id=args.oci_compartment_id,
-        oci_auth_profile=args.oci_auth_profile,
-    )
-
-    reranker = build_reranker(args.rerank_model)
-
-    rinfo["rerank_model"] = args.rerank_model
-    rinfo["rerank_top_n"] = rerank_top_n
-    rinfo["chat_provider"] = args.chat_provider
-    rinfo["chat_model"] = resolved_chat_model
-
-    app = build_qa_graph(
-        llm=chat_llm,
-        retriever=retriever,
-        reranker=reranker,
-        rerank_top_n=rerank_top_n,
-        debug=args.debug,
-    )
+    try:
+        runtime = initialize_session(config)
+    except ValueError as exc:
+        parser.error(str(exc))
+        return
 
     if args.graph_diagram:
         try:
             png_path = export_graph_diagram(
-                app,
+                runtime.app,
                 args.graph_diagram,
                 debug=args.debug,
             )
@@ -552,7 +908,8 @@ def main() -> None:
             print(f"[warn] failed to save graph diagram: {exc}")
 
     if args.debug:
-        print("[debug] topic:", args.topic_name)
+        rinfo = runtime.retriever_info
+        print("[debug] topic:", config.topic_name)
         print("[debug] persist_dir:", rinfo["persist_dir"])
         print("[debug] persist_candidates:", " | ".join(rinfo.get("persist_candidates", [])))
         print("[debug] collection:", rinfo["collection"])
@@ -566,67 +923,59 @@ def main() -> None:
         print("[debug] rerank_top_n:", rinfo.get("rerank_top_n"))
         print("[debug] chat_provider:", rinfo.get("chat_provider"))
         print("[debug] chat_model:", rinfo.get("chat_model"))
-        print("[debug] chat_temperature:", args.chat_temperature)
-        print("[debug] user_id:", user_id)
+        print("[debug] chat_temperature:", config.chat_temperature)
+        print("[debug] user_id:", config.user_id)
 
     if args.inspect:
         q = args.inspect
-        docs_scores = vector_store.similarity_search_with_score(q, k=args.k)
-        if not docs_scores:
+        inspection = runtime.inspect(q)
+        top_matches = inspection["top_matches"]
+        if not top_matches:
             print("No documents found for the provided query.")
             return
 
         print("Top matches (vector similarity order):")
-        inspected_docs: List[Document] = []
-        for doc, score in docs_scores:
-            doc.metadata["similarity_score"] = float(score)
-            inspected_docs.append(doc)
-            src = doc.metadata.get("source", "?")
-            page = doc.metadata.get("page", "?")
-            print(f"- score={score:.4f}  {src} (p{page})")
+        for doc_info in top_matches:
+            score = doc_info.get("similarity_score")
+            src = doc_info.get("source", "?")
+            page = doc_info.get("page", "?")
+            if score is not None:
+                print(f"- score={score:.4f}  {src} (p{page})")
+            else:
+                print(f"- {src} (p{page})")
 
-        if reranker:
-            reranked = rerank_documents(q, inspected_docs, reranker, rerank_top_n)
+        if runtime.reranker:
+            reranked_matches = inspection["reranked_matches"]
             print("\nRe-ranked (cross-encoder) top results:")
-            for doc in reranked:
-                src = doc.metadata.get("source", "?")
-                page = doc.metadata.get("page", "?")
-                rscore = doc.metadata.get("rerank_score")
-                sscore = doc.metadata.get("similarity_score")
+            for doc_info in reranked_matches:
+                src = doc_info.get("source", "?")
+                page = doc_info.get("page", "?")
+                rscore = doc_info.get("rerank_score")
+                sscore = doc_info.get("similarity_score")
                 score_info = []
                 if rscore is not None:
-                    score_info.append(f"rerank={float(rscore):.4f}")
+                    score_info.append(f"rerank={rscore:.4f}")
                 if sscore is not None:
-                    score_info.append(f"sim={float(sscore):.4f}")
+                    score_info.append(f"sim={sscore:.4f}")
                 display_scores = " ".join(score_info)
                 print(f"- {display_scores}  {src} (p{page})")
         else:
             print("\nCross-encoder reranker unavailable; skipping re-rank results.")
         return
 
-    def run_once(q: str) -> None:
-        history_messages = list(conversation_memory.messages)
-        state: QAState = {
-            "question": q,
-            "context": [],
-            "answer": "",
-            "history": history_messages,
-        }
-        if args.debug:
-            print("[debug] run_once question:", q)
-            print("[debug] run_once history message count:", len(history_messages))
-        result = app.invoke(state)
-        answer_raw = result.get("answer", "")
-        answer = answer_raw if isinstance(answer_raw, str) else str(answer_raw)
+    def run_once(question: str) -> None:
+        result = runtime.run_query(question)
+
         print("\n=== Answer ===\n")
-        print(answer)
-        if args.show_sources:
+        print(result.answer)
+
+        if config.show_sources:
             print("\n--- Sources ---")
-            context_docs = result.get("context", [])
+            context_docs = result.context_docs
             if not context_docs:
                 print("(no sources found)")
             else:
-                if args.debug:
+                if config.debug:
                     print("[debug] run_once context doc count:", len(context_docs))
                 for doc in context_docs:
                     src = doc.metadata.get("source", "?")
@@ -638,9 +987,6 @@ def main() -> None:
                         else ""
                     )
                     print(f"- {src} (p{page}){score_info}")
-
-        conversation_memory.add_user_message(q)
-        conversation_memory.add_ai_message(answer)
 
     if args.query:
         run_once(args.query)

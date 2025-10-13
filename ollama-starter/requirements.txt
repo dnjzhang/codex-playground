@@ -10,3 +10,5 @@ pandas
 beautifulsoup4
 markdownify
 sentence-transformers
+fastapi
+uvicorn
