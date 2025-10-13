@@ -30,26 +30,20 @@ import os
 from typing import Dict, List, Sequence, Tuple, TypedDict
 
 from langchain_chroma import Chroma
+from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.documents import Document
+from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.graph import MermaidDrawMethod
-from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.graph import END, StateGraph
-from langchain_core.messages import BaseMessage
-from langchain_core.chat_history import InMemoryChatMessageHistory
 
-try:
-    from langchain_community.chat_models.oci_generative_ai import ChatOCIGenAI
-except ImportError:  # noqa: WPS440 - optional dependency
-    ChatOCIGenAI = None  # type: ignore[assignment]
-
-try:
-    from langchain_community.embeddings.oci_generative_ai import (
-        OCIGenAIEmbeddings,
-    )
-except ImportError:  # noqa: WPS440 - optional dependency
-    OCIGenAIEmbeddings = None  # type: ignore[assignment]
+from provider_lib import (
+    build_reranker,
+    init_chat_model,
+    init_embedding_function,
+    load_oci_config_data,
+)
 
 
 class QAState(TypedDict, total=False):
@@ -68,182 +62,6 @@ def _load_db_metadata(persist_dir: str) -> Dict | None:
             return json.load(f)
     except Exception:
         return None
-
-
-def load_oci_config_data(oci_config: str | None) -> Dict[str, str]:
-    """Load OCI configuration data from JSON."""
-
-    config_path = oci_config or "oci-config.json"
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"OCI config file not found: {config_path}")
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as config_file:
-            data = json.load(config_file)
-    except json.JSONDecodeError as exc:  # noqa: BLE001
-        raise ValueError(
-            f"Invalid OCI config JSON at {config_path}: {exc}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"Expected OCI config to contain a JSON object at {config_path}"
-        )
-
-    return {str(key): str(value) for key, value in data.items() if value is not None}
-
-
-def resolve_oci_base_settings(
-    config_data: Dict[str, str],
-    *,
-    endpoint_override: str | None,
-    compartment_override: str | None,
-    auth_profile_override: str | None,
-) -> Dict[str, str]:
-    """Resolve core OCI settings with CLI overrides taking precedence."""
-
-    settings = {
-        "service_endpoint": endpoint_override or config_data.get("endpoint"),
-        "compartment_id": compartment_override or config_data.get("compartment_ocid"),
-        "auth_profile": auth_profile_override or config_data.get("config_profile"),
-    }
-
-    missing = [key for key, value in settings.items() if not value]
-    if missing:
-        details = ", ".join(missing)
-        raise ValueError(
-            "Missing OCI configuration values: "
-            f"{details}. Provide CLI overrides or update the OCI config JSON."
-        )
-
-    return {key: str(value) for key, value in settings.items()}
-
-
-def init_embedding_function(
-    provider: str,
-    embedding_model: str | None,
-    *,
-    oci_config: str | None,
-    oci_config_data: Dict[str, str] | None,
-    oci_endpoint: str | None,
-    oci_compartment_id: str | None,
-    oci_auth_profile: str | None,
-) -> Tuple[object, str]:
-    provider_key = provider.lower()
-
-    if provider_key == "ollama":
-        model_id = embedding_model or "mxbai-embed-large"
-        embeddings = OllamaEmbeddings(model=model_id)
-        return embeddings, model_id
-
-    if provider_key == "oci":
-        if OCIGenAIEmbeddings is None:
-            raise ImportError(
-                "langchain-community OCI embeddings are unavailable. Install the"
-                " required extras (e.g., `pip install langchain-community`)."
-            )
-
-        config_data = oci_config_data or load_oci_config_data(oci_config)
-        settings = resolve_oci_base_settings(
-            config_data,
-            endpoint_override=oci_endpoint,
-            compartment_override=oci_compartment_id,
-            auth_profile_override=oci_auth_profile,
-        )
-        model_id = (
-            embedding_model
-            or config_data.get("embedding_model_name")
-            or config_data.get("model_name")
-        )
-        if not model_id:
-            raise ValueError(
-                "OCI embedding model id is missing. Provide --embedding-model or"
-                " set embedding_model_name in the OCI config."
-            )
-
-        embeddings = OCIGenAIEmbeddings(
-            model_id=model_id,
-            service_endpoint=settings["service_endpoint"],
-            compartment_id=settings["compartment_id"],
-            auth_profile=settings["auth_profile"],
-            model_kwargs={"truncate": True},
-        )
-        return embeddings, model_id
-
-    raise ValueError("Unsupported embedding provider. Choose from: ollama, oci, auto.")
-
-
-def init_chat_model(
-    provider: str,
-    chat_model: str | None,
-    *,
-    temperature: float,
-    oci_config: str | None,
-    oci_config_data: Dict[str, str] | None,
-    oci_endpoint: str | None,
-    oci_compartment_id: str | None,
-    oci_auth_profile: str | None,
-) -> Tuple[object, str]:
-    provider_key = provider.lower()
-
-    if provider_key == "ollama":
-        model_id = chat_model or "llama3.2"
-        llm = ChatOllama(model=model_id, temperature=temperature)
-        return llm, model_id
-
-    if provider_key == "oci":
-        if ChatOCIGenAI is None:
-            raise ImportError(
-                "langchain-community OCI chat model support is unavailable. Install"
-                " the required extras (e.g., `pip install langchain-community`)."
-            )
-
-        config_data = oci_config_data or load_oci_config_data(oci_config)
-        settings = resolve_oci_base_settings(
-            config_data,
-            endpoint_override=oci_endpoint,
-            compartment_override=oci_compartment_id,
-            auth_profile_override=oci_auth_profile,
-        )
-        model_id = chat_model or config_data.get("model_name")
-        if not model_id:
-            raise ValueError(
-                "OCI chat model id is missing. Provide --chat-model or set"
-                " model_name in the OCI config."
-            )
-
-        llm = ChatOCIGenAI(
-            model_id=model_id,
-            service_endpoint=settings["service_endpoint"],
-            compartment_id=settings["compartment_id"],
-            auth_profile=settings["auth_profile"],
-            model_kwargs={"max_tokens": 2048, "temperature": temperature},
-        )
-        return llm, model_id
-
-    raise ValueError("Unsupported chat provider. Choose from: ollama, oci.")
-
-
-def build_reranker(model_name: str):
-    """Instantiate a HuggingFace cross-encoder reranker."""
-
-    try:
-        from langchain_community.cross_encoders.huggingface import (
-            HuggingFaceCrossEncoder,
-        )
-    except ImportError as exc:  # noqa: BLE001
-        raise ImportError(
-            "Install sentence-transformers to use cross-encoder reranking: "
-            "`pip install sentence-transformers`"
-        ) from exc
-
-    try:
-        return HuggingFaceCrossEncoder(model_name=model_name)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            "Failed to initialize cross-encoder reranker. "
-            "Ensure required ML dependencies (e.g., torch) are installed."
-        ) from exc
 
 
 def rerank_documents(
@@ -271,6 +89,45 @@ def rerank_documents(
     return [doc for doc, _ in scored_docs[:bounded_top_n]]
 
 
+def _resolve_persist_dir(
+    persist_root: str,
+    topic_name: str,
+    *,
+    debug: bool = False,
+) -> Tuple[str, List[str]]:
+    """Resolve the vector store directory, tolerating different run locations."""
+
+    candidates: List[str] = []
+    root_is_absolute = os.path.isabs(persist_root)
+    primary = os.path.join(persist_root, topic_name)
+    candidates.append(primary)
+
+    if not root_is_absolute:
+        module_root = os.path.dirname(os.path.abspath(__file__))
+        module_candidate = os.path.join(module_root, persist_root, topic_name)
+        if module_candidate not in candidates:
+            candidates.append(module_candidate)
+
+    resolved = None
+    for path in candidates:
+        if os.path.isdir(path):
+            resolved = path
+            break
+
+    if resolved is None:
+        resolved = primary
+
+    if debug:
+        print(
+            "[debug] retriever persist candidates:",
+            " | ".join(candidates),
+        )
+        exists = "yes" if os.path.isdir(resolved) else "no"
+        print(f"[debug] retriever persist_dir resolved: {resolved} (exists={exists})")
+
+    return resolved, candidates
+
+
 def build_retriever(
     topic_name: str,
     persist_root: str,
@@ -286,11 +143,24 @@ def build_retriever(
     oci_endpoint: str | None,
     oci_compartment_id: str | None,
     oci_auth_profile: str | None,
+    debug: bool = False,
 ):
-    persist_dir = os.path.join(persist_root, topic_name)
+    persist_dir, persist_candidates = _resolve_persist_dir(
+        persist_root,
+        topic_name,
+        debug=debug,
+    )
     collection = collection_name or topic_name
 
     meta = _load_db_metadata(persist_dir) or {}
+
+    if debug:
+        meta_path = os.path.join(persist_dir, "db_meta.json")
+        print(f"[debug] retriever meta path: {meta_path}")
+        print(
+            "[debug] retriever meta keys:",
+            sorted(meta.keys()) if meta else "none",
+        )
 
     provider_key = embedding_provider.lower()
     if provider_key in {"", "auto"}:
@@ -319,18 +189,40 @@ def build_retriever(
         persist_directory=persist_dir,
         embedding_function=embeddings,
     )
+
+    document_count = None
+    try:
+        document_count = vector_store._collection.count()
+    except Exception:  # noqa: BLE001 - Chroma internals are optional
+        if debug:
+            print("[debug] unable to query Chroma document count")
+
+    if debug:
+        print(
+            "[debug] retriever initialized:",
+            f"provider={provider_key}",
+            f"model={resolved_model}",
+            f"collection={collection}",
+        )
+        print(
+            "[debug] retriever Chroma stats:",
+            f"documents={document_count if document_count is not None else 'unknown'}",
+        )
+
     kwargs = {"k": k}
     if lambda_mult is not None:
         kwargs["lambda_mult"] = lambda_mult
     retriever = vector_store.as_retriever(search_type=search_type, search_kwargs=kwargs)
     info = {
         "persist_dir": persist_dir,
+        "persist_candidates": persist_candidates,
         "collection": collection,
         "embedding_provider": provider_key,
         "embedding_model": resolved_model,
         "k": k,
         "search_type": search_type,
         "lambda_mult": lambda_mult,
+        "document_count": document_count,
     }
     return retriever, info, vector_store
 
@@ -342,6 +234,7 @@ def build_qa_graph(
     reranker=None,
     rerank_top_n: int | None = None,
     system_preamble: str | None = None,
+    debug: bool = False,
 ):
     system_text = system_preamble or (
         "You are a helpful assistant. Use the provided context to answer "
@@ -362,14 +255,39 @@ def build_qa_graph(
     chain = prompt | llm | StrOutputParser()
 
     def retrieve_node(state: QAState) -> Dict:
-        docs: List[Document] = retriever.invoke(state["question"])
+        question = state["question"]
+        docs: List[Document] = retriever.invoke(question)
+        if debug:
+            print(
+                "[debug] retrieve_node: question=",
+                repr(question),
+                "docs_found=",
+                len(docs),
+            )
         desired_top_n = rerank_top_n or len(docs)
         if reranker and docs:
-            context_docs = rerank_documents(
-                state["question"], docs, reranker, desired_top_n
-            )
+            context_docs = rerank_documents(question, docs, reranker, desired_top_n)
+            if debug:
+                top_doc = context_docs[0] if context_docs else None
+                if top_doc is not None:
+                    print(
+                        "[debug] retrieve_node reranked top source:",
+                        top_doc.metadata.get("source"),
+                        "page=",
+                        top_doc.metadata.get("page"),
+                        "score=",
+                        top_doc.metadata.get("rerank_score"),
+                    )
         else:
             context_docs = docs[:desired_top_n]
+            if debug and context_docs:
+                top_doc = context_docs[0]
+                print(
+                    "[debug] retrieve_node top source:",
+                    top_doc.metadata.get("source"),
+                    "page=",
+                    top_doc.metadata.get("page"),
+                )
         return {"context": context_docs, "history": state.get("history", [])}
 
     def generate_node(state: QAState) -> Dict:
@@ -378,6 +296,14 @@ def build_qa_graph(
             f"[source: {d.metadata.get('source','?')} p{d.metadata.get('page','?')}]\n{d.page_content}"
             for d in state.get("context", [])
         )
+        if debug:
+            context_bytes = len(context_text.encode("utf-8"))
+            print(
+                "[debug] generate_node context docs:",
+                len(state.get("context", [])),
+                "context_bytes=",
+                context_bytes,
+            )
         answer = chain.invoke(
             {
                 "question": state["question"],
@@ -385,6 +311,9 @@ def build_qa_graph(
                 "history": state.get("history", []),
             }
         )
+        if debug:
+            preview = answer[:120].replace("\n", " ") if isinstance(answer, str) else str(answer)
+            print("[debug] generate_node answer preview:", preview)
         return {
             "answer": answer,
             "context": state.get("context", []),
@@ -577,6 +506,7 @@ def main() -> None:
         oci_endpoint=args.oci_endpoint,
         oci_compartment_id=args.oci_compartment_id,
         oci_auth_profile=args.oci_auth_profile,
+        debug=args.debug,
     )
 
     oci_config_data: Dict[str, str] | None = None
@@ -606,6 +536,7 @@ def main() -> None:
         retriever=retriever,
         reranker=reranker,
         rerank_top_n=rerank_top_n,
+        debug=args.debug,
     )
 
     if args.graph_diagram:
@@ -623,11 +554,14 @@ def main() -> None:
     if args.debug:
         print("[debug] topic:", args.topic_name)
         print("[debug] persist_dir:", rinfo["persist_dir"])
+        print("[debug] persist_candidates:", " | ".join(rinfo.get("persist_candidates", [])))
         print("[debug] collection:", rinfo["collection"])
         print("[debug] embedding_provider:", rinfo.get("embedding_provider"))
         print("[debug] embedding_model:", rinfo["embedding_model"])
         print("[debug] search_type:", rinfo["search_type"])
         print("[debug] k:", rinfo["k"], "lambda_mult:", rinfo["lambda_mult"])
+        if rinfo.get("document_count") is not None:
+            print("[debug] retriever_document_count:", rinfo["document_count"])
         print("[debug] rerank_model:", rinfo.get("rerank_model"))
         print("[debug] rerank_top_n:", rinfo.get("rerank_top_n"))
         print("[debug] chat_provider:", rinfo.get("chat_provider"))
@@ -678,6 +612,9 @@ def main() -> None:
             "answer": "",
             "history": history_messages,
         }
+        if args.debug:
+            print("[debug] run_once question:", q)
+            print("[debug] run_once history message count:", len(history_messages))
         result = app.invoke(state)
         answer_raw = result.get("answer", "")
         answer = answer_raw if isinstance(answer_raw, str) else str(answer_raw)
@@ -689,6 +626,8 @@ def main() -> None:
             if not context_docs:
                 print("(no sources found)")
             else:
+                if args.debug:
+                    print("[debug] run_once context doc count:", len(context_docs))
                 for doc in context_docs:
                     src = doc.metadata.get("source", "?")
                     page = doc.metadata.get("page", "?")
