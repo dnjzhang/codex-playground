@@ -1,11 +1,12 @@
 """
-Topic PDF → Chroma vector builder using Ollama embeddings.
+Topic documents → Chroma vector builder using Ollama embeddings.
 
 Usage examples:
   python ollama-starter/build_topic_vector_db.py --topic-dir ollama-starter/topics/spring-boot
   python ollama-starter/build_topic_vector_db.py --topic-dir ./my_topic --topic-name my-topic --embedding-model mxbai-embed-large
 
-This script scans a topic folder for PDFs, loads + splits them using
+This script scans a topic folder for PDFs (default) or plain text files,
+loads + splits them using
 LangChain loaders and text splitter, and persists a Chroma DB per topic.
 
 Requirements (install under ollama-starter):
@@ -21,29 +22,29 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-from glob import glob
-from typing import List
 import json
 from datetime import datetime
+from glob import glob
+from typing import List
 
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 
 
-def find_pdfs(topic_dir: str) -> List[str]:
+def find_files(topic_dir: str, extension: str) -> List[str]:
     patterns = [
-        os.path.join(topic_dir, "**", "*.pdf"),
-        os.path.join(topic_dir, "*.pdf"),
+        os.path.join(topic_dir, "**", f"*.{extension}"),
+        os.path.join(topic_dir, f"*.{extension}"),
     ]
-    pdfs: List[str] = []
+    files: List[str] = []
     for pattern in patterns:
-        pdfs.extend(glob(pattern, recursive=True))
+        files.extend(glob(pattern, recursive=True))
     # Deduplicate preserving order
     seen = set()
     unique: List[str] = []
-    for p in pdfs:
+    for p in files:
         if p not in seen:
             seen.add(p)
             unique.append(p)
@@ -59,9 +60,13 @@ def build_topic_db(
     chunk_size: int = 1200,
     chunk_overlap: int = 200,
     reset: bool = False,
+    input_format: str = "pdf",
 ) -> str:
     if not os.path.isdir(topic_dir):
         raise FileNotFoundError(f"Topic directory not found: {topic_dir}")
+
+    if input_format not in {"pdf", "text"}:
+        raise ValueError("input_format must be either 'pdf' or 'text'")
 
     topic = topic_name or os.path.basename(os.path.abspath(topic_dir))
     collection = collection_name or f"topic_{topic}"
@@ -74,13 +79,16 @@ def build_topic_db(
         shutil.rmtree(persist_dir)
         os.makedirs(persist_dir, exist_ok=True)
 
-    pdf_paths = find_pdfs(topic_dir)
-    if not pdf_paths:
-        raise FileNotFoundError(f"No PDFs found under: {topic_dir}")
+    extension = "pdf" if input_format == "pdf" else "txt"
+    source_paths = find_files(topic_dir, extension)
+    if not source_paths:
+        raise FileNotFoundError(
+            f"No {extension.upper()} files found under: {topic_dir}"
+        )
 
     print(f"[builder] Topic: {topic}")
-    print(f"[builder] PDFs found: {len(pdf_paths)}")
-    for p in pdf_paths:
+    print(f"[builder] {extension.upper()} files found: {len(source_paths)}")
+    for p in source_paths:
         print(f"  - {p}")
 
     # Load and split
@@ -92,21 +100,28 @@ def build_topic_db(
 
     all_splits = []
     ids = []
-    for pdf in pdf_paths:
-        loader = PyPDFLoader(pdf)
-        pages = loader.load()  # list[Document], page-wise
-        splits = text_splitter.split_documents(pages)
+    for doc_path in source_paths:
+        if input_format == "pdf":
+            loader = PyPDFLoader(doc_path)
+        else:
+            loader = TextLoader(doc_path, encoding="utf-8")
+        documents = loader.load()
+        splits = text_splitter.split_documents(documents)
         # attach topic/source metadata and create stable IDs
         for i, d in enumerate(splits):
+            rel_source = os.path.relpath(doc_path, start=topic_dir)
             d.metadata = {
                 **d.metadata,
                 "topic": topic,
-                "source": os.path.relpath(pdf, start=topic_dir),
+                "source": rel_source,
             }
             # Construct id: <source>#<page>-<offset>-<i>
-            page_num = d.metadata.get("page", 0)
-            start = d.metadata.get("start_index", 0)
-            ids.append(f"{d.metadata['source']}#p{page_num}-o{start}-{i}")
+            page_num = d.metadata.get("page")
+            if page_num is None:
+                page_num = 1
+                d.metadata["page"] = page_num
+            start = d.metadata.get("start_index", i * chunk_size)
+            ids.append(f"{rel_source}#p{page_num}-o{start}-{i}")
         all_splits.extend(splits)
 
     print(f"[builder] Total chunks: {len(all_splits)}")
@@ -132,7 +147,8 @@ def build_topic_db(
         "embedding_model": embedding_model,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
-        "source_files": [os.path.relpath(p, start=topic_dir) for p in pdf_paths],
+        "input_format": input_format,
+        "source_files": [os.path.relpath(p, start=topic_dir) for p in source_paths],
         "built_at": datetime.utcnow().isoformat() + "Z",
     }
     try:
@@ -155,6 +171,12 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=1200, help="Text splitter chunk size")
     parser.add_argument("--chunk-overlap", type=int, default=200, help="Text splitter chunk overlap")
     parser.add_argument("--reset", action="store_true", help="If set, recreate the topic DB directory")
+    parser.add_argument(
+        "--input-format",
+        choices=["pdf", "text"],
+        default="pdf",
+        help="Document format to ingest (default: pdf)",
+    )
 
     args = parser.parse_args()
 
@@ -167,9 +189,9 @@ def main() -> None:
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
         reset=bool(args.reset),
+        input_format=args.input_format,
     )
 
 
 if __name__ == "__main__":
     main()
-

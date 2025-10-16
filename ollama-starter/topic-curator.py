@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 
-"""Topic PDF → Chroma vector curator.
+"""Topic document → Chroma vector curator.
 
-This utility scans a directory of PDFs, generates embeddings with Ollama or
+This utility scans a directory of PDFs (default) or plain text files, generates embeddings with Ollama or
 OCI Generative AI, and persists a Chroma vector store for the provided topic.
 
 Example:
     python topic-curator.py \
-        --pdf-dir ./topics/spring-boot \
+        --source-dir ./topics/spring-boot \
         --topic-name spring-boot \
         --embedding-provider ollama \
         --embedding-model mxbai-embed-large
 
     python topic-curator.py \
-        --pdf-dir ./topics/sprint-planning \
+        --source-dir ./topics/sprint-planning \
         --topic-name sprint-planning \
         --embedding-provider oci \
         --oci-config ./oci-config.json
+
+    python topic-curator.py \
+        --source-dir ./topics/plain-notes \
+        --topic-name planning-notes \
+        --input-format text
 
 Ensure Ollama is running locally and the embedding model is available
 (e.g., `ollama pull mxbai-embed-large`). For OCI embeddings, configure
@@ -35,7 +40,7 @@ from typing import Dict, List, Tuple
 
 from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_ollama import OllamaEmbeddings
 
 try:
@@ -46,17 +51,17 @@ except ImportError:  # noqa: WPS440 - optional dependency
     OCIGenAIEmbeddings = None  # type: ignore[assignment]
 
 
-def find_pdfs(pdf_dir: str) -> List[str]:
+def find_source_files(source_dir: str, extension: str) -> List[str]:
     patterns = [
-        os.path.join(pdf_dir, "**", "*.pdf"),
-        os.path.join(pdf_dir, "*.pdf"),
+        os.path.join(source_dir, "**", f"*.{extension}"),
+        os.path.join(source_dir, f"*.{extension}"),
     ]
-    pdfs: List[str] = []
+    files: List[str] = []
     for pattern in patterns:
-        pdfs.extend(glob(pattern, recursive=True))
+        files.extend(glob(pattern, recursive=True))
     seen = set()
     ordered: List[str] = []
-    for path in pdfs:
+    for path in files:
         if path not in seen:
             seen.add(path)
             ordered.append(path)
@@ -151,7 +156,7 @@ def init_embeddings(
 
 
 def build_topic_vectors(
-    pdf_dir: str,
+    source_dir: str,
     topic_name: str | None = None,
     persist_root: str = ".chroma",
     embedding_provider: str = "ollama",
@@ -163,11 +168,15 @@ def build_topic_vectors(
     oci_endpoint: str | None = None,
     oci_compartment_id: str | None = None,
     oci_auth_profile: str | None = None,
+    input_format: str = "pdf",
 ) -> str:
-    if not os.path.isdir(pdf_dir):
-        raise FileNotFoundError(f"PDF directory not found: {pdf_dir}")
+    if not os.path.isdir(source_dir):
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
 
-    topic = topic_name or os.path.basename(os.path.abspath(pdf_dir))
+    if input_format not in {"pdf", "text"}:
+        raise ValueError("input_format must be either 'pdf' or 'text'")
+
+    topic = topic_name or os.path.basename(os.path.abspath(source_dir))
     topic = topic.strip()
     if not topic:
         raise ValueError("Topic name could not be determined; provide --topic-name.")
@@ -180,14 +189,17 @@ def build_topic_vectors(
 
     os.makedirs(topic_dir, exist_ok=True)
 
-    pdf_paths = find_pdfs(pdf_dir)
-    if not pdf_paths:
-        raise FileNotFoundError(f"No PDFs found under: {pdf_dir}")
+    extension = "pdf" if input_format == "pdf" else "txt"
+    source_paths = find_source_files(source_dir, extension)
+    if not source_paths:
+        raise FileNotFoundError(
+            f"No {extension.upper()} files found under: {source_dir}"
+        )
 
     print(f"[curator] Topic: {topic}")
-    print(f"[curator] Source directory: {os.path.abspath(pdf_dir)}")
-    print(f"[curator] PDFs located: {len(pdf_paths)}")
-    for path in pdf_paths:
+    print(f"[curator] Source directory: {os.path.abspath(source_dir)}")
+    print(f"[curator] {extension.upper()} files located: {len(source_paths)}")
+    for path in source_paths:
         print(f"  - {path}")
 
     splitter = RecursiveCharacterTextSplitter(
@@ -198,19 +210,26 @@ def build_topic_vectors(
 
     documents = []
     ids = []
-    for pdf_path in pdf_paths:
-        loader = PyPDFLoader(pdf_path)
+    for doc_path in source_paths:
+        if input_format == "pdf":
+            loader = PyPDFLoader(doc_path)
+        else:
+            loader = TextLoader(doc_path, encoding="utf-8")
         pages = loader.load()
         splits = splitter.split_documents(pages)
         for index, doc in enumerate(splits):
+            rel_source = os.path.relpath(doc_path, start=source_dir)
             doc.metadata = {
                 **doc.metadata,
                 "topic": topic,
-                "source": os.path.relpath(pdf_path, start=pdf_dir),
+                "source": rel_source,
             }
-            page_num = doc.metadata.get("page", 0)
-            start_index = doc.metadata.get("start_index", 0)
-            ids.append(f"{doc.metadata['source']}#p{page_num}-o{start_index}-{index}")
+            page_num = doc.metadata.get("page")
+            if page_num is None:
+                page_num = 1
+                doc.metadata["page"] = page_num
+            start_index = doc.metadata.get("start_index", index * chunk_size)
+            ids.append(f"{rel_source}#p{page_num}-o{start_index}-{index}")
         documents.extend(splits)
 
     print(f"[curator] Total text chunks: {len(documents)}")
@@ -243,8 +262,9 @@ def build_topic_vectors(
         "embedding_model": resolved_model,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
-        "source_dir": os.path.abspath(pdf_dir),
-        "source_files": [os.path.relpath(path, start=pdf_dir) for path in pdf_paths],
+        "input_format": input_format,
+        "source_dir": os.path.abspath(source_dir),
+        "source_files": [os.path.relpath(path, start=source_dir) for path in source_paths],
         "built_at": datetime.utcnow().isoformat() + "Z",
     }
     try:
@@ -259,17 +279,17 @@ def build_topic_vectors(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert a directory of PDFs into a topic-specific Chroma vector database.",
+        description="Convert a directory of documents into a topic-specific Chroma vector database.",
     )
     parser.add_argument(
-        "--pdf-dir",
+        "--source-dir",
         required=True,
-        help="Directory containing source PDFs",
+        help="Directory containing source documents",
     )
     parser.add_argument(
         "--topic-name",
         default=None,
-        help="Name of the topic; defaults to the PDF directory name",
+        help="Name of the topic; defaults to the source directory name",
     )
     parser.add_argument(
         "--persist-root",
@@ -286,6 +306,12 @@ def parse_args() -> argparse.Namespace:
         "--embedding-model",
         default=None,
         help="Embedding model identifier; defaults per provider",
+    )
+    parser.add_argument(
+        "--input-format",
+        choices=["pdf", "text"],
+        default="pdf",
+        help="Document format to ingest (default: pdf)",
     )
     parser.add_argument(
         "--chunk-size",
@@ -330,7 +356,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     build_topic_vectors(
-        pdf_dir=args.pdf_dir,
+        source_dir=args.source_dir,
         topic_name=args.topic_name,
         persist_root=args.persist_root,
         embedding_provider=args.embedding_provider,
@@ -342,6 +368,7 @@ def main() -> None:
         oci_endpoint=args.oci_endpoint,
         oci_compartment_id=args.oci_compartment_id,
         oci_auth_profile=args.oci_auth_profile,
+        input_format=args.input_format,
     )
 
 
