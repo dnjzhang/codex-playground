@@ -93,6 +93,43 @@ Run `rag-pipeline-topic-hub.py --serve-api` to expose REST endpoints:
 - `POST /sessions/{session_id}/chat` accepts `{ "question": "..." }` and returns the model answer plus optional source metadata.
 Configure host/port via `--api-host` and `--api-port`. Cross-origin requests are allowed for local prototyping.
 
+## MCP Tool Integration (Optional)
+`rag-pipeline-topic-hub.py` automatically binds chat providers to MCP tools published by your `db-mcp-server`. When registration succeeds, the agent emits an info-level log listing every tool it can call, and any tool call selected by the model (for example, `list_tables`) is executed against the MCP server with the results fed back into the conversation.
+
+### Configure via Environment Variables
+Provide the SSE endpoint for the server (no auth headers are required by default):
+
+```bash
+export DB_MCP_TRANSPORT=sse
+export DB_MCP_SSE_URL=http://localhost:8080/sse
+# Optional: limit which tools are exposed
+# export DB_MCP_TOOLS=searchLog,anotherTool
+```
+
+### Configure via YAML or JSON
+You can capture the same settings in a config file and point the loader at it:
+
+```yaml
+# mcp-config.yaml
+db_mcp:
+  transport: sse
+  sse_url: http://127.0.0.1:5173/mcp
+  # headers:
+  #   Authorization: Bearer <token-if-needed>
+  tools:
+    - searchLog
+```
+
+```bash
+export DB_MCP_CONFIG=./mcp-config.yaml
+```
+
+JSON files follow the same shape. The loader expands `~` and relative paths, and environment variables still take precedence over file entries. Install `pyyaml` if you prefer YAML:
+
+```bash
+pip install pyyaml
+```
+
 ## Next Steps
 - Capture additional topic folders and rebuild via `topic-curator.py --reset` to refresh embeddings.
 - Tune retrieval/rerank parameters per topic to balance recall vs. precision.

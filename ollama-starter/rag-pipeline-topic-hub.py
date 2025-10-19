@@ -25,18 +25,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import threading
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple, TypedDict
+from typing import Any, Dict, List, Mapping, Sequence, Tuple, TypedDict
 
 from langchain_chroma import Chroma
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.documents import Document
-from langchain_core.messages import BaseMessage
-from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.graph import MermaidDrawMethod
 from langgraph.graph import END, StateGraph
@@ -47,6 +47,7 @@ from provider_lib import (
     init_embedding_function,
     load_oci_config_data,
 )
+from mcp_registration import MCPToolContext
 from pydantic import BaseModel, Field
 
 
@@ -88,6 +89,9 @@ class ChatResult:
     context_docs: List[Document]
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 @dataclass
 class SessionRuntime:
     config: PipelineConfig
@@ -97,6 +101,7 @@ class SessionRuntime:
     vector_store: Any
     reranker: Any
     rerank_top_n: int
+    mcp_context: MCPToolContext | None
     resolved_chat_model: str | None
 
     def run_query(self, question: str) -> ChatResult:
@@ -449,6 +454,7 @@ def build_qa_graph(
     rerank_top_n: int | None = None,
     system_preamble: str | None = None,
     debug: bool = False,
+    mcp_context: MCPToolContext | None = None,
 ):
     system_text = system_preamble or (
         "You are a helpful assistant. Use the provided context to answer "
@@ -465,8 +471,6 @@ def build_qa_graph(
             ),
         ]
     )
-
-    chain = prompt | llm | StrOutputParser()
 
     def retrieve_node(state: QAState) -> Dict:
         question = state["question"]
@@ -504,6 +508,22 @@ def build_qa_graph(
                 )
         return {"context": context_docs, "history": state.get("history", [])}
 
+    def _render_ai_response(message: AIMessage) -> str:
+        content = message.content
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            fragments: List[str] = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    fragments.append(str(item["text"]))
+                elif hasattr(item, "get") and item.get("text") is not None:  # type: ignore[call-arg]
+                    fragments.append(str(item.get("text")))  # pragma: no cover - defensive
+                else:
+                    fragments.append(str(item))
+            return "".join(fragments)
+        return str(content)
+
     def generate_node(state: QAState) -> Dict:
         # Join docs into text blocks for the prompt
         context_text = "\n\n".join(
@@ -518,18 +538,82 @@ def build_qa_graph(
                 "context_bytes=",
                 context_bytes,
             )
-        answer = chain.invoke(
-            {
-                "question": state["question"],
-                "context": context_text,
-                "history": state.get("history", []),
-            }
+        prompt_messages = prompt.format_messages(
+            question=state["question"],
+            context=context_text,
+            history=state.get("history", []),
         )
-        if debug:
-            preview = answer[:120].replace("\n", " ") if isinstance(answer, str) else str(answer)
-            print("[debug] generate_node answer preview:", preview)
+
+        conversation: List[Any] = list(prompt_messages)
+        response = llm.invoke(conversation)
+        tool_ctx = mcp_context or getattr(llm, "_mcp_context", None)
+        iterations = 0
+
+        while isinstance(response, AIMessage) and getattr(response, "tool_calls", None):
+            if not tool_ctx:
+                LOGGER.warning(
+                    "LLM requested MCP tool call but no MCP context is available; skipping tool execution."
+                )
+                break
+
+            tool_messages: List[ToolMessage] = []
+            for call in response.tool_calls:
+                call_name = getattr(call, "name", None) or call.get("name")  # type: ignore[arg-type]
+                if not call_name:
+                    LOGGER.warning("Received MCP tool call without a name; skipping.")
+                    continue
+                raw_args = getattr(call, "args", None) or call.get("args", {})  # type: ignore[arg-type]
+                if not isinstance(raw_args, Mapping):
+                    raw_args = {}
+                call_id = getattr(call, "id", None) or call.get("id")  # type: ignore[arg-type]
+                try:
+                    args_preview = json.dumps(dict(raw_args), ensure_ascii=False) if raw_args else "{}"
+                except TypeError:
+                    args_preview = str(raw_args)
+                if len(args_preview) > 200:
+                    args_preview = f"{args_preview[:197]}..."
+                LOGGER.info("MCP tool requested: %s args=%s", call_name, args_preview)
+                try:
+                    result_text = tool_ctx.call_tool(str(call_name), dict(raw_args))
+                except Exception as exc:  # noqa: BLE001 - surface tool errors to the model
+                    LOGGER.warning("MCP tool %s raised an error: %s", call_name, exc)
+                    result_text = f"Tool {call_name} failed: {exc}"
+                else:
+                    preview = result_text.strip()
+                    if len(preview) > 200:
+                        preview = f"{preview[:197]}..."
+                    LOGGER.info("MCP tool %s returned %s characters: %s", call_name, len(result_text), preview)
+
+                tool_messages.append(
+                    ToolMessage(
+                        content=result_text,
+                        tool_call_id=str(call_id or call_name or "mcp_tool"),
+                    )
+                )
+
+            conversation.append(response)
+            if not tool_messages:
+                LOGGER.warning("LLM returned tool calls but none were executed; skipping tool loop.")
+                break
+            conversation.extend(tool_messages)
+            iterations += 1
+            if iterations >= 5:
+                LOGGER.warning("Stopping MCP tool loop after %d iterations", iterations)
+                break
+            response = llm.invoke(conversation)
+
+        if isinstance(response, AIMessage):
+            answer_text = _render_ai_response(response)
+            if debug:
+                preview = answer_text[:120].replace("\n", " ")
+                print("[debug] generate_node answer preview:", preview)
+        else:
+            answer_text = str(response)
+            if debug:
+                preview = answer_text[:120].replace("\n", " ")
+                print("[debug] generate_node answer preview:", preview)
         return {
-            "answer": answer,
+            "answer": answer_text,
             "context": state.get("context", []),
             "history": state.get("history", []),
         }
@@ -638,6 +722,7 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         oci_compartment_id=config.oci_compartment_id,
         oci_auth_profile=config.oci_auth_profile,
     )
+    mcp_context: MCPToolContext | None = getattr(chat_llm, "_mcp_context", None)
 
     reranker = build_reranker(config.rerank_model)
 
@@ -646,6 +731,7 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         retriever,
         reranker=reranker,
         rerank_top_n=rerank_top_n,
+        mcp_context=mcp_context,
         debug=config.debug,
     )
 
@@ -664,6 +750,7 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         vector_store=vector_store,
         reranker=reranker,
         rerank_top_n=rerank_top_n,
+        mcp_context=mcp_context,
         resolved_chat_model=resolved_chat_model,
     )
 

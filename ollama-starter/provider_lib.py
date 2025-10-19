@@ -20,6 +20,8 @@ try:
 except ImportError:  # noqa: WPS440 - optional dependency
     OCIGenAIEmbeddings = None  # type: ignore[assignment]
 
+from mcp_registration import register_db_mcp_tools
+
 
 def load_oci_config_data(oci_config: str | None) -> Dict[str, str]:
     """Load OCI configuration data from JSON."""
@@ -144,6 +146,7 @@ def init_chat_model(
     if provider_key == "ollama":
         model_id = chat_model or "llama3.2"
         llm = ChatOllama(model=model_id, temperature=temperature)
+        llm, _ = register_db_mcp_tools(llm)
         return llm, model_id
 
     if provider_key == "oci":
@@ -174,6 +177,7 @@ def init_chat_model(
             auth_profile=settings["auth_profile"],
             model_kwargs={"max_tokens": 2048, "temperature": temperature},
         )
+        llm, _ = register_db_mcp_tools(llm)
         return llm, model_id
 
     raise ValueError("Unsupported chat provider. Choose from: ollama, oci.")
