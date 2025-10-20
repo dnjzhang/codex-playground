@@ -104,6 +104,8 @@ export DB_MCP_TRANSPORT=sse
 export DB_MCP_SSE_URL=http://localhost:8080/sse
 # Optional: limit which tools are exposed
 # export DB_MCP_TOOLS=searchLog,anotherTool
+# Generic fallbacks are also honoured (e.g. MCP_TRANSPORT, MCP_SSE_URL, MCP_TOOLS)
+# when the DB_MCP_* variables are not set.
 ```
 
 ### Configure via YAML or JSON
@@ -116,8 +118,8 @@ db_mcp:
   sse_url: http://127.0.0.1:5173/mcp
   # headers:
   #   Authorization: Bearer <token-if-needed>
-  tools:
-    - searchLog
+  # tools:        # optional; omit to expose every MCP tool the server provides
+  #   - searchLog
 ```
 
 ```bash
