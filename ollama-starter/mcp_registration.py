@@ -450,10 +450,21 @@ def _ensure_object_schema(data: Mapping[str, Any]) -> Dict[str, Any]:
 def _tool_to_spec(tool: mcp_types.Tool) -> Dict[str, Any]:
     description = tool.description or f"MCP tool '{tool.name}' exposed by db-mcp-server."
     schema = _schema_to_json(tool.inputSchema)
+    properties = {}
+    if isinstance(schema.get("properties"), Mapping):
+        properties = dict(schema.get("properties", {}))
+    required = schema.get("required") if isinstance(schema, Mapping) else None
+    if isinstance(required, list):
+        required_fields = [str(item) for item in required]
+    else:
+        required_fields = []
     return {
         "name": tool.name,
         "description": description,
         "parameters": schema,
+        "title": tool.name,
+        "properties": properties,
+        **({"required": required_fields} if required_fields else {}),
     }
 
 
