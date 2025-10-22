@@ -81,10 +81,11 @@ After installation, start the service with `ollama serve` and keep it running wh
   - `--chat-provider ollama` (default) with optional `--chat-model` override.
   - `--chat-provider oci` for OCI Generative AI chat (`oci-config.json` must include `model_name`).
 - CLI modes:
-  - `--query "…" ` runs a single turn and exits.
-  - Interactive chat prompts until `q`, `quit`, or `exit`.
-  - `--show-sources` prints retrieved context metadata.
-  - `--inspect "…" ` inspects vector and reranker scores without generating an answer.
+- `--query "…" ` runs a single turn and exits.
+- Interactive chat prompts until `q`, `quit`, or `exit`.
+- `--show-sources` prints retrieved context metadata.
+- `--inspect "…" ` inspects vector and reranker scores without generating an answer.
+- `--disable-mcp` skips MCP tool registration if you want a pure vector-RAG run.
 - Graph visualization: `--graph-diagram path/to/diagram.png` exports the LangGraph structure (requires a Mermaid rendering backend).
 
 ## FastAPI Server
@@ -95,6 +96,8 @@ Configure host/port via `--api-host` and `--api-port`. Cross-origin requests are
 
 ## MCP Tool Integration (Optional)
 `rag-pipeline-topic-hub.py` automatically binds chat providers to MCP tools published by your `db-mcp-server`. When registration succeeds, the agent emits an info-level log listing every tool it can call, and any tool call selected by the model (for example, `list_tables`) is executed against the MCP server with the results fed back into the conversation.
+
+To opt out for a given run, start the script with `--disable-mcp` (the FastAPI payload exposes the same toggle via the `enable_mcp` flag).
 
 ### Configure via Environment Variables
 Provide the SSE endpoint for the server (no auth headers are required by default):

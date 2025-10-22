@@ -80,6 +80,7 @@ class PipelineConfig:
     user_id: str = "default"
     show_sources: bool = False
     debug: bool = False
+    enable_mcp: bool = True
 
 
 @dataclass
@@ -228,6 +229,7 @@ class SessionCreatePayload(BaseModel):
     show_sources: bool = Field(False, description="Include source metadata in responses")
     debug: bool = Field(False, description="Enable debug logging")
     graph_diagram: str | None = Field(None, description="Optional path to save the compiled LangGraph structure as a PNG image")
+    enable_mcp: bool = Field(True, description="Enable registration and use of MCP tools")
 
     def to_pipeline_config(self) -> PipelineConfig:
         return PipelineConfig(
@@ -251,6 +253,7 @@ class SessionCreatePayload(BaseModel):
             user_id=self.user_id,
             show_sources=self.show_sources,
             debug=self.debug,
+            enable_mcp=self.enable_mcp,
         )
 
 
@@ -458,8 +461,18 @@ def build_qa_graph(
 ):
     system_text = system_preamble or (
         "You are a helpful assistant. Use the provided context to answer "
-        "the user's question concisely. If the answer is unknown, say so."
+        "the user's question concisely. If the answer is unknown, say so.  Use tools only related to questions about CPP application."
     )
+
+    if mcp_context:
+        tool_names = ", ".join(mcp_context.list_tool_names()) or "(none)"
+        system_text += (
+            "\n\nYou can optionally call MCP tools when a question clearly requires "
+            "live database or log access regarding CPP application. Available tools: "
+            f"{tool_names}. Only call a tool when its capability is essential "
+            "to answer the user and related to CPP application; otherwise, respond directly from the retrieved "
+            "context."
+        )
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -721,8 +734,11 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         oci_endpoint=config.oci_endpoint,
         oci_compartment_id=config.oci_compartment_id,
         oci_auth_profile=config.oci_auth_profile,
+        enable_mcp=config.enable_mcp,
     )
-    mcp_context: MCPToolContext | None = getattr(chat_llm, "_mcp_context", None)
+    mcp_context: MCPToolContext | None = None
+    if config.enable_mcp:
+        mcp_context = getattr(chat_llm, "_mcp_context", None)
 
     reranker = build_reranker(config.rerank_model)
 
@@ -885,6 +901,11 @@ def main() -> None:
     parser.add_argument("--lambda-mult", type=float, default=None, help="Diversity factor for MMR (0-1)")
     parser.add_argument("--query", default=None, help="Run a single query then exit; if omitted, starts interactive mode")
     parser.add_argument("--show-sources", action="store_true", help="Print brief source info after each answer")
+    parser.add_argument(
+        "--disable-mcp",
+        action="store_true",
+        help="Disable MCP tool registration and tool execution for this session",
+    )
     parser.add_argument("--debug", action="store_true", help="Print debug info about DB + retrieval")
     parser.add_argument("--inspect", default=None, help="Inspect retrieval only: print top docs and scores for a query, then exit")
     parser.add_argument(
@@ -974,6 +995,7 @@ def main() -> None:
         user_id=args.user_id or "default",
         show_sources=args.show_sources,
         debug=args.debug,
+        enable_mcp=not args.disable_mcp,
     )
 
     try:

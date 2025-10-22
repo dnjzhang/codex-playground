@@ -138,6 +138,7 @@ def init_chat_model(
     oci_endpoint: str | None,
     oci_compartment_id: str | None,
     oci_auth_profile: str | None,
+    enable_mcp: bool = True,
 ) -> Tuple[object, str]:
     """Instantiate the chat model for the requested provider."""
 
@@ -146,7 +147,8 @@ def init_chat_model(
     if provider_key == "ollama":
         model_id = chat_model or "llama3.2"
         llm = ChatOllama(model=model_id, temperature=temperature)
-        llm, _ = register_db_mcp_tools(llm)
+        if enable_mcp:
+            llm, _ = register_db_mcp_tools(llm)
         return llm, model_id
 
     if provider_key == "oci":
@@ -177,7 +179,8 @@ def init_chat_model(
             auth_profile=settings["auth_profile"],
             model_kwargs={"max_tokens": 2048, "temperature": temperature},
         )
-        llm, _ = register_db_mcp_tools(llm)
+        if enable_mcp:
+            llm, _ = register_db_mcp_tools(llm)
         return llm, model_id
 
     raise ValueError("Unsupported chat provider. Choose from: ollama, oci.")
