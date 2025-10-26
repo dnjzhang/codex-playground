@@ -9,15 +9,9 @@ from typing import Dict, Tuple
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 try:
-    from langchain_community.chat_models.oci_generative_ai import ChatOCIGenAI
+    from langchain_oci import ChatOCIGenAI, OCIGenAIEmbeddings
 except ImportError:  # noqa: WPS440 - optional dependency
     ChatOCIGenAI = None  # type: ignore[assignment]
-
-try:
-    from langchain_community.embeddings.oci_generative_ai import (
-        OCIGenAIEmbeddings,
-    )
-except ImportError:  # noqa: WPS440 - optional dependency
     OCIGenAIEmbeddings = None  # type: ignore[assignment]
 
 from mcp_registration import register_db_mcp_tools
@@ -94,8 +88,8 @@ def init_embedding_function(
     if provider_key == "oci":
         if OCIGenAIEmbeddings is None:
             raise ImportError(
-                "langchain-community OCI embeddings are unavailable. Install the"
-                " required extras (e.g., `pip install langchain-community`)."
+                "langchain-oci embeddings are unavailable. Install the required "
+                "extras (e.g., `pip install langchain-oci`)."
             )
 
         config_data = oci_config_data or load_oci_config_data(oci_config)
@@ -121,7 +115,7 @@ def init_embedding_function(
             service_endpoint=settings["service_endpoint"],
             compartment_id=settings["compartment_id"],
             auth_profile=settings["auth_profile"],
-            model_kwargs={"truncate": True},
+            truncate="END",
         )
         return embeddings, model_id
 
@@ -154,8 +148,8 @@ def init_chat_model(
     if provider_key == "oci":
         if ChatOCIGenAI is None:
             raise ImportError(
-                "langchain-community OCI chat model support is unavailable. Install"
-                " the required extras (e.g., `pip install langchain-community`)."
+                "langchain-oci chat model support is unavailable. Install the "
+                "required extras (e.g., `pip install langchain-oci`)."
             )
 
         config_data = oci_config_data or load_oci_config_data(oci_config)
@@ -177,7 +171,10 @@ def init_chat_model(
             service_endpoint=settings["service_endpoint"],
             compartment_id=settings["compartment_id"],
             auth_profile=settings["auth_profile"],
-            model_kwargs={"max_tokens": 2048, "temperature": temperature},
+            model_kwargs={
+                "max_tokens": int(config_data.get("max_tokens", 2048)),
+                "temperature": temperature,
+            },
         )
         if enable_mcp:
             llm, _ = register_db_mcp_tools(llm)

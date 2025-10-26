@@ -15,9 +15,12 @@ import shlex
 import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Type, Union, get_args, get_origin
 
 import concurrent.futures
+
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel as PydanticBaseModel, Field as PydanticField, create_model
 
 try:
     from mcp import types as mcp_types
@@ -215,6 +218,118 @@ def _select_config_section(data: Mapping[str, Any], server_prefix: str) -> Mappi
                 return value
 
     return data
+
+
+_JSON_TYPE_TO_PYTHON: Dict[str, Any] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": List[Any],
+    "object": Dict[str, Any],
+    "null": type(None),
+    "any": Any,
+}
+
+
+def _resolve_python_type(schema: Mapping[str, Any]) -> Any:
+    type_value = schema.get("type")
+
+    if isinstance(type_value, list):
+        non_null = [item for item in type_value if str(item).lower() != "null"]
+        if not non_null:
+            return Optional[Any]
+        primary = non_null[0]
+        base = _JSON_TYPE_TO_PYTHON.get(str(primary).lower(), Any)
+        return Optional[base]
+
+    if isinstance(type_value, str):
+        key = type_value.lower()
+        if key == "array":
+            items = schema.get("items")
+            if isinstance(items, Mapping):
+                inner = _resolve_python_type(items)
+            else:
+                inner = Any
+            return List[inner]
+        if key == "object":
+            return Dict[str, Any]
+        return _JSON_TYPE_TO_PYTHON.get(key, Any)
+
+    return Any
+
+
+def _ensure_optional(py_type: Any) -> Any:
+    origin = get_origin(py_type)
+    if origin is Union:
+        if type(None) in get_args(py_type):
+            return py_type
+        return Optional[Any]
+    return Optional[py_type]
+
+
+def _create_args_model(spec: Mapping[str, Any]) -> Type[PydanticBaseModel]:
+    parameters = spec.get("parameters") if isinstance(spec, Mapping) else {}
+    properties: Mapping[str, Any] = {}
+    if isinstance(parameters, Mapping):
+        params_props = parameters.get("properties")
+        if isinstance(params_props, Mapping):
+            properties = params_props
+    if not properties and isinstance(spec.get("properties"), Mapping):
+        properties = spec["properties"]  # type: ignore[assignment]
+
+    required: Iterable[str] = []
+    if isinstance(parameters, Mapping) and isinstance(parameters.get("required"), Iterable):
+        required = parameters.get("required")  # type: ignore[assignment]
+    additional_required = spec.get("required")
+    if isinstance(additional_required, Iterable):
+        required = list(required) + list(additional_required)
+    required_set = {str(item) for item in required}
+
+    fields: Dict[str, Tuple[Any, Any]] = {}
+    for name, prop in properties.items():
+        if not isinstance(prop, Mapping):
+            continue
+        python_type = _resolve_python_type(prop)
+        description = prop.get("description", "")
+        default = prop.get("default", None)
+        if name in required_set:
+            fields[name] = (
+                python_type,
+                PydanticField(..., description=description),
+            )
+        else:
+            optional_type = _ensure_optional(python_type)
+            fields[name] = (
+                optional_type,
+                PydanticField(default, description=description),
+            )
+
+    model_name = f"MCP{spec.get('name', 'Tool').title()}Args"
+    if not fields:
+        return create_model(model_name, __base__=PydanticBaseModel)  # type: ignore[return-value]
+
+    return create_model(model_name, __base__=PydanticBaseModel, **fields)  # type: ignore[return-value]
+
+
+def _spec_to_structured_tool(spec: Mapping[str, Any]) -> StructuredTool:
+    args_model = _create_args_model(spec)
+
+    def _stub(**kwargs: Any) -> Dict[str, Any]:
+        return {
+            "tool": spec.get("name"),
+            "args": kwargs,
+            "message": "MCP tools are executed by the pipeline runtime.",
+        }
+
+    _stub.__name__ = f"mcp_{spec.get('name', 'tool')}_stub"
+
+    return StructuredTool(
+        name=str(spec.get("name")),
+        description=str(spec.get("description", "")),
+        args_schema=args_model,
+        func=_stub,
+    )
 
 
 def _ensure_logger_configured() -> None:
@@ -621,7 +736,9 @@ def register_db_mcp_tools(
             LOGGER.warning(message)
         return llm, None
 
-    bound = llm.bind_tools(specs)
+    tools_for_binding = [_spec_to_structured_tool(spec) for spec in specs]
+
+    bound = llm.bind_tools(tools_for_binding)
     context = MCPToolContext(config=config, specs=specs)
     setattr(bound, "_mcp_context", context)
 
