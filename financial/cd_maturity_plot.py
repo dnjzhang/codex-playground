@@ -16,6 +16,11 @@ def parse_dates(series: pd.Series, *, date_format: str | None) -> pd.Series:
     if date_format and date_format.lower() != "auto":
         parsed = pd.to_datetime(series, errors="coerce", format=date_format)
         if parsed.notna().any() or series.dropna().empty():
+            if parsed.isna().any():
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="Could not infer format")
+                    fallback = pd.to_datetime(series[parsed.isna()], errors="coerce")
+                parsed = parsed.fillna(fallback)
             return parsed
 
     with warnings.catch_warnings():
