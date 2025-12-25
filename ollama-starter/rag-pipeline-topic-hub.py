@@ -91,6 +91,7 @@ class ChatResult:
 
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_MCP_STREAMABLE_HTTP_URL = "http://localhost:8080/mcp"
 
 
 @dataclass
@@ -279,11 +280,38 @@ def _load_db_metadata(persist_dir: str) -> Dict | None:
     meta_path = os.path.join(persist_dir, "db_meta.json")
     if not os.path.exists(meta_path):
         return None
+
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
+
+
+def _apply_default_mcp_settings(enable_mcp: bool) -> None:
+    if not enable_mcp:
+        return
+    if os.getenv("DB_MCP_TRANSPORT") or os.getenv("MCP_TRANSPORT"):
+        return
+    if os.getenv("DB_MCP_CONFIG") or os.getenv("MCP_CONFIG_FILE"):
+        return
+    if os.getenv("DB_MCP_COMMAND") or os.getenv("MCP_COMMAND"):
+        return
+
+    http_url = (
+        os.getenv("DB_MCP_HTTP_URL")
+        or os.getenv("MCP_HTTP_URL")
+        or os.getenv("DB_MCP_STREAMABLE_HTTP_URL")
+        or os.getenv("MCP_STREAMABLE_HTTP_URL")
+    )
+    sse_url = os.getenv("DB_MCP_SSE_URL") or os.getenv("MCP_SSE_URL")
+
+    if sse_url:
+        os.environ.setdefault("DB_MCP_TRANSPORT", "sse")
+        return
+
+    os.environ.setdefault("DB_MCP_TRANSPORT", "streamable_http")
+    os.environ.setdefault("DB_MCP_HTTP_URL", http_url or DEFAULT_MCP_STREAMABLE_HTTP_URL)
 
 
 def rerank_documents(
@@ -703,6 +731,8 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         raise ValueError("--rerank-top-n must be a positive integer when provided")
 
     rerank_top_n = _compute_rerank_top_n(config.k, config.rerank_top_n)
+
+    _apply_default_mcp_settings(config.enable_mcp)
 
     retriever, retriever_info, vector_store = build_retriever(
         topic_name=config.topic_name,

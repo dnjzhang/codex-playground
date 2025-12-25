@@ -27,12 +27,14 @@ try:
     from mcp.client.session import ClientSession
     from mcp.client.sse import sse_client
     from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.streamable_http import streamablehttp_client
 except ImportError:  # pragma: no cover - optional dependency
     mcp_types = None  # type: ignore[assignment]
     ClientSession = None  # type: ignore[assignment]
     sse_client = None  # type: ignore[assignment]
     stdio_client = None  # type: ignore[assignment]
     StdioServerParameters = None  # type: ignore[assignment]
+    streamablehttp_client = None  # type: ignore[assignment]
 
 
 LOGGER = logging.getLogger(__name__)
@@ -355,6 +357,7 @@ class MCPRegistrationConfig:
     env: Optional[Mapping[str, str]] = field(default=None)
     cwd: Optional[str] = field(default=None)
     sse_url: Optional[str] = field(default=None)
+    http_url: Optional[str] = field(default=None)
     headers: Optional[Mapping[str, str]] = field(default=None)
     request_timeout: float = 10.0
     sse_read_timeout: float = 300.0
@@ -383,6 +386,17 @@ class MCPRegistrationConfig:
 
         cwd_value = env.get(f"{server_prefix}_CWD") or config_section.get("cwd") or config_section.get("working_dir")
         cwd = os.path.expanduser(cwd_value) if isinstance(cwd_value, str) else None
+
+        http_url_value = (
+            env.get(f"{server_prefix}_HTTP_URL")
+            or env.get(f"{server_prefix}_STREAMABLE_HTTP_URL")
+            or env.get("MCP_HTTP_URL")
+            or env.get("MCP_STREAMABLE_HTTP_URL")
+            or config_section.get("http_url")
+            or config_section.get("streamable_http_url")
+            or config_section.get("streamable_url")
+        )
+        http_url = str(http_url_value) if http_url_value else None
 
         sse_url_value = (
             env.get(f"{server_prefix}_SSE_URL")
@@ -414,6 +428,8 @@ class MCPRegistrationConfig:
             transport = transport_env_value.strip().lower()
         elif transport_config_value:
             transport = str(transport_config_value).strip().lower()
+        elif http_url:
+            transport = "streamable_http"
         elif sse_url:
             transport = "sse"
         elif command:
@@ -421,7 +437,11 @@ class MCPRegistrationConfig:
         else:
             transport = "stdio"
 
-        if transport not in {"stdio", "sse"}:
+        transport = transport.replace("-", "_")
+        if transport in {"http", "streamablehttp"}:
+            transport = "streamable_http"
+
+        if transport not in {"stdio", "sse", "streamable_http"}:
             transport = "stdio"
 
         request_default = _coerce_float(
@@ -459,6 +479,7 @@ class MCPRegistrationConfig:
             env=env_overrides,
             cwd=cwd,
             sse_url=sse_url,
+            http_url=http_url,
             headers=headers,
             request_timeout=request_timeout,
             sse_read_timeout=sse_read_timeout,
@@ -483,13 +504,42 @@ def _run_coro_sync(coro):
 
 @asynccontextmanager
 async def _connect_transport(cfg: MCPRegistrationConfig):
-    if ClientSession is None or stdio_client is None or sse_client is None:
+    if ClientSession is None:
         raise ImportError(
             "The `mcp` Python package is required to register MCP tools. "
             "Install it with `pip install modelcontextprotocol`."
         )
 
+    if cfg.transport == "streamable_http":
+        if streamablehttp_client is None:
+            raise ImportError(
+                "The installed `mcp` package does not support Streamable HTTP. "
+                "Upgrade with `pip install --upgrade modelcontextprotocol`."
+            )
+        url = cfg.http_url or cfg.sse_url
+        if not url:
+            raise ValueError(
+                "MCP Streamable HTTP transport requires a URL. "
+                "Set DB_MCP_HTTP_URL (or MCP_HTTP_URL)."
+            )
+
+        headers = dict(cfg.headers) if cfg.headers is not None else None
+        async with streamablehttp_client(
+            url,
+            headers=headers,
+            timeout=cfg.request_timeout,
+            sse_read_timeout=cfg.sse_read_timeout,
+        ) as streams:
+            read_stream, write_stream, _ = streams
+            yield read_stream, write_stream
+            return
+
     if cfg.transport == "sse":
+        if sse_client is None:
+            raise ImportError(
+                "The installed `mcp` package does not support SSE transport. "
+                "Upgrade with `pip install --upgrade modelcontextprotocol`."
+            )
         if not cfg.sse_url:
             raise ValueError("MCP SSE transport requires a URL. Set DB_MCP_SSE_URL or MCP_SSE_URL.")
 
@@ -503,6 +553,11 @@ async def _connect_transport(cfg: MCPRegistrationConfig):
             yield streams
             return
 
+    if stdio_client is None or StdioServerParameters is None:
+        raise ImportError(
+            "The installed `mcp` package does not support stdio transport. "
+            "Upgrade with `pip install --upgrade modelcontextprotocol`."
+        )
     if not cfg.command:
         raise ValueError(
             "MCP stdio transport requires a launch command. "
@@ -713,7 +768,11 @@ def register_db_mcp_tools(
     LOGGER.info(
         "Attempting MCP registration via %s transport%s",
         config.transport,
-        f" ({config.sse_url})" if config.transport == "sse" and config.sse_url else "",
+        (
+            f" ({config.http_url or config.sse_url})"
+            if config.transport in {"sse", "streamable_http"} and (config.http_url or config.sse_url)
+            else ""
+        ),
     )
 
     try:
@@ -744,7 +803,9 @@ def register_db_mcp_tools(
 
     tool_names = ", ".join(sorted(tool.get("name", "<unnamed>") for tool in specs))
     location_hint = ""
-    if config.transport == "sse" and config.sse_url:
+    if config.transport == "streamable_http" and (config.http_url or config.sse_url):
+        location_hint = f" (streamable HTTP {config.http_url or config.sse_url})"
+    elif config.transport == "sse" and config.sse_url:
         location_hint = f" (SSE {config.sse_url})"
     elif config.transport == "stdio" and config.command:
         location_hint = f" (stdio command: {' '.join(config.command)})"
