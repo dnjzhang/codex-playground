@@ -135,6 +135,36 @@ JSON files follow the same shape. The loader expands `~` and relative paths, and
 pip install pyyaml
 ```
 
+## Observability (OpenTelemetry + OpenInference)
+The RAG pipeline can emit traces + metrics via OpenTelemetry with OpenInference auto-instrumentation.
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+Optional (if you want explicit LangGraph spans and the package is available):
+```bash
+pip install openinference-instrumentation-langgraph
+```
+
+Enable instrumentation (disabled by default) and configure OTLP export:
+```bash
+export OBSERVABILITY_ENABLED=true
+export OTEL_SERVICE_NAME=rag-pipeline-topic-hub
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+```
+
+By default, prompt/response content is hidden. To capture content:
+```bash
+export OBSERVABILITY_CAPTURE_CONTENT=true
+```
+
+`start-api.sh` and `start-cli.sh` set these values with sensible defaults for local collection; export overrides in your shell to change them.
+
+Token usage metrics: Ollama reports token counts via `prompt_eval_count` and `eval_count`, while OCI (and other providers) typically use OpenAI-style `prompt_tokens`/`completion_tokens`.
+
+For local macOS collection, see `agent-otel/README.md` for the collector container setup.
+
 ## Next Steps
 - Capture additional topic folders and rebuild via `topic-curator.py --reset` to refresh embeddings.
 - Tune retrieval/rerank parameters per topic to balance recall vs. precision.

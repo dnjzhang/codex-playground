@@ -1,12 +1,15 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Python utilities live at the repo root: `topic-curator.py` builds Chroma topic stores, `rag-pipeline-topic-hub.py` runs LangGraph retrieval workflows, and `provider_lib.py` bundles shared provider helpers. Keep supporting modules beside these scripts or under lightweight subfolders. Store docs, diagrams, and walkthroughs under `docs/`, leave historical experiments in `archive/`, and host the React client inside `topic-hub-web/`. Place new datasets or fixtures next to the code that consumes them, and co-locate tests in the same folder or a local `tests/` subdirectory.
+Python utilities live at the repo root: `topic-curator.py` builds Chroma topic stores, `rag-pipeline-topic-hub.py` runs LangGraph retrieval workflows, and `provider_lib.py` bundles shared provider helpers. Observability helpers live in `observability/` and local collector setup lives in `agent-otel/`. Keep supporting modules beside these scripts or under lightweight subfolders. Store docs, diagrams, and walkthroughs under `docs/`, leave historical experiments in `archive/`, and host the React client inside `topic-hub-web/`. Place new datasets or fixtures next to the code that consumes them, and co-locate tests in the same folder or a local `tests/` subdirectory.
 
 ## Build, Test, and Development Commands
 - `python -m venv .venv && source .venv/bin/activate` bootstraps the Python toolchain.
 - `pip install -r requirements.txt` installs backend dependencies for the CLI and API utilities.
-- `python topic-curator.py --help` and `python rag-pipeline-topic-hub.py --serve-api` run the ingestion tool and the FastAPI interface.
+- `./start-cli.sh --topic-name <topic>` runs the interactive CLI with observability defaults.
+- `./start-api.sh` runs the FastAPI interface with observability defaults.
+- `python topic-curator.py --help` and `python rag-pipeline-topic-hub.py --serve-api` run the ingestion tool and the FastAPI interface directly.
+- `cd agent-otel && ./start-collect.sh` launches the local OpenTelemetry collector container.
 - `pytest -q` executes backend tests from the repo root; add `-k <pattern>` to focus runs.
 - `cd topic-hub-web && npm install` followed by `npm run dev` launches the chat UI; use `npm run build` for production assets and `npm run lint` for TypeScript diagnostics.
 

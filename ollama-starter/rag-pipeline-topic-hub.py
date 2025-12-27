@@ -47,6 +47,7 @@ from provider_lib import (
     init_embedding_function,
     load_oci_config_data,
 )
+from observability.otel import ObservabilityManager, init_observability
 from mcp_registration import MCPToolContext
 from pydantic import BaseModel, Field
 
@@ -105,6 +106,7 @@ class SessionRuntime:
     rerank_top_n: int
     mcp_context: MCPToolContext | None
     resolved_chat_model: str | None
+    observability: ObservabilityManager | None
 
     def run_query(self, question: str) -> ChatResult:
         history_messages = list(self.conversation_memory.messages)
@@ -486,6 +488,7 @@ def build_qa_graph(
     system_preamble: str | None = None,
     debug: bool = False,
     mcp_context: MCPToolContext | None = None,
+    observability: ObservabilityManager | None = None,
 ):
     system_text = system_preamble or (
         "You are a helpful assistant. Use the provided context to answer "
@@ -515,7 +518,11 @@ def build_qa_graph(
 
     def retrieve_node(state: QAState) -> Dict:
         question = state["question"]
-        docs: List[Document] = retriever.invoke(question)
+        callback_config = observability.callback_config() if observability else None
+        if callback_config:
+            docs = retriever.invoke(question, config=callback_config)
+        else:
+            docs = retriever.invoke(question)
         if debug:
             print(
                 "[debug] retrieve_node: question=",
@@ -586,7 +593,11 @@ def build_qa_graph(
         )
 
         conversation: List[Any] = list(prompt_messages)
-        response = llm.invoke(conversation)
+        callback_config = observability.callback_config() if observability else None
+        if callback_config:
+            response = llm.invoke(conversation, config=callback_config)
+        else:
+            response = llm.invoke(conversation)
         tool_ctx = mcp_context or getattr(llm, "_mcp_context", None)
         iterations = 0
 
@@ -614,6 +625,8 @@ def build_qa_graph(
                 if len(args_preview) > 200:
                     args_preview = f"{args_preview[:197]}..."
                 LOGGER.info("MCP tool requested: %s args=%s", call_name, args_preview)
+                if observability:
+                    observability.record_tool_call(str(call_name))
                 try:
                     result_text = tool_ctx.call_tool(str(call_name), dict(raw_args))
                 except Exception as exc:  # noqa: BLE001 - surface tool errors to the model
@@ -641,7 +654,10 @@ def build_qa_graph(
             if iterations >= 5:
                 LOGGER.warning("Stopping MCP tool loop after %d iterations", iterations)
                 break
-            response = llm.invoke(conversation)
+            if callback_config:
+                response = llm.invoke(conversation, config=callback_config)
+            else:
+                response = llm.invoke(conversation)
 
         if isinstance(response, AIMessage):
             answer_text = _render_ai_response(response)
@@ -733,6 +749,7 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
     rerank_top_n = _compute_rerank_top_n(config.k, config.rerank_top_n)
 
     _apply_default_mcp_settings(config.enable_mcp)
+    observability = init_observability()
 
     retriever, retriever_info, vector_store = build_retriever(
         topic_name=config.topic_name,
@@ -778,6 +795,7 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         reranker=reranker,
         rerank_top_n=rerank_top_n,
         mcp_context=mcp_context,
+        observability=observability,
         debug=config.debug,
     )
 
@@ -798,6 +816,7 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         rerank_top_n=rerank_top_n,
         mcp_context=mcp_context,
         resolved_chat_model=resolved_chat_model,
+        observability=observability,
     )
 
 

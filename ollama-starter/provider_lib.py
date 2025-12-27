@@ -187,17 +187,22 @@ def build_reranker(model_name: str):
     """Instantiate a HuggingFace cross-encoder reranker."""
 
     try:
-        from langchain_community.cross_encoders.huggingface import (
-            HuggingFaceCrossEncoder,
-        )
+        from sentence_transformers import CrossEncoder
     except ImportError as exc:  # noqa: BLE001
         raise ImportError(
             "Install sentence-transformers to use cross-encoder reranking: "
             "`pip install sentence-transformers`"
         ) from exc
 
+    class _SentenceTransformersCrossEncoder:
+        def __init__(self, model_id: str) -> None:
+            self._model = CrossEncoder(model_id)
+
+        def score(self, pairs):
+            return self._model.predict(pairs).tolist()
+
     try:
-        return HuggingFaceCrossEncoder(model_name=model_name)
+        return _SentenceTransformersCrossEncoder(model_name)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "Failed to initialize cross-encoder reranker. "
