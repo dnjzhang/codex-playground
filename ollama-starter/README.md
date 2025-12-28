@@ -100,39 +100,12 @@ Configure host/port via `--api-host` and `--api-port`. Cross-origin requests are
 To opt out for a given run, start the script with `--disable-mcp` (the FastAPI payload exposes the same toggle via the `enable_mcp` flag).
 
 ### Configure via Environment Variables
-Provide the SSE endpoint for the server (no auth headers are required by default):
+Provide the Streamable HTTP endpoint for the server (defaults to `http://localhost:8080/mcp`):
 
 ```bash
-export DB_MCP_TRANSPORT=sse
-export DB_MCP_SSE_URL=http://localhost:8080/sse
+export DB_MCP_URL=http://localhost:8080/mcp
 # Optional: limit which tools are exposed
 # export DB_MCP_TOOLS=searchLog,anotherTool
-# Generic fallbacks are also honoured (e.g. MCP_TRANSPORT, MCP_SSE_URL, MCP_TOOLS)
-# when the DB_MCP_* variables are not set.
-```
-
-### Configure via YAML or JSON
-You can capture the same settings in a config file and point the loader at it:
-
-```yaml
-# mcp-config.yaml
-db_mcp:
-  transport: sse
-  sse_url: http://127.0.0.1:5173/mcp
-  # headers:
-  #   Authorization: Bearer <token-if-needed>
-  # tools:        # optional; omit to expose every MCP tool the server provides
-  #   - searchLog
-```
-
-```bash
-export DB_MCP_CONFIG=./mcp-config.yaml
-```
-
-JSON files follow the same shape. The loader expands `~` and relative paths, and environment variables still take precedence over file entries. Install `pyyaml` if you prefer YAML:
-
-```bash
-pip install pyyaml
 ```
 
 ## Observability (OpenTelemetry + OpenInference)
@@ -162,6 +135,20 @@ export OBSERVABILITY_CAPTURE_CONTENT=true
 `start-api.sh` and `start-cli.sh` set these values with sensible defaults for local collection; export overrides in your shell to change them.
 
 Token usage metrics: Ollama reports token counts via `prompt_eval_count` and `eval_count`, while OCI (and other providers) typically use OpenAI-style `prompt_tokens`/`completion_tokens`.
+
+QA logging to OTel (disabled by default):
+```bash
+export QA_LOGGING_ENABLED=true
+# Set to false to store only hashes (question/answer fields remain empty strings)
+export QA_LOG_CONTENT=true
+```
+
+Each QA log record includes `start_timestamp` (UTC), `complete_timestamp` (UTC), and `elapsed_ms` for end-to-end latency.
+
+How to verify QA logs:
+1) Run the agent once with `QA_LOGGING_ENABLED=true`.
+2) Confirm the collector output contains a log record with `"type":"response"` or `"type":"error"`.
+   - For the local file collector, check `agent-otel/otel-out/logs.json`.
 
 For local macOS collection, see `agent-otel/README.md` for the collector container setup.
 

@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import os
-import shlex
 import warnings
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -25,15 +24,10 @@ from pydantic import BaseModel as PydanticBaseModel, Field as PydanticField, cre
 try:
     from mcp import types as mcp_types
     from mcp.client.session import ClientSession
-    from mcp.client.sse import sse_client
-    from mcp.client.stdio import StdioServerParameters, stdio_client
     from mcp.client.streamable_http import streamablehttp_client
 except ImportError:  # pragma: no cover - optional dependency
     mcp_types = None  # type: ignore[assignment]
     ClientSession = None  # type: ignore[assignment]
-    sse_client = None  # type: ignore[assignment]
-    stdio_client = None  # type: ignore[assignment]
-    StdioServerParameters = None  # type: ignore[assignment]
     streamablehttp_client = None  # type: ignore[assignment]
 
 
@@ -49,37 +43,6 @@ def _str_to_bool(value: str | None, *, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
-
-
-def _parse_headers(value: str) -> Mapping[str, str]:
-    """Parse header overrides from either JSON or comma-separated ``key=value`` pairs."""
-
-    if not value:
-        return {}
-    text = value.strip()
-    if not text:
-        return {}
-
-    if text.startswith("{"):
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                return {str(key): str(val) for key, val in parsed.items()}
-        except json.JSONDecodeError:
-            pass
-
-    headers: Dict[str, str] = {}
-    for part in text.split(","):
-        if not part.strip():
-            continue
-        if "=" in part:
-            key, raw_value = part.split("=", 1)
-        elif ":" in part:
-            key, raw_value = part.split(":", 1)
-        else:
-            continue
-        headers[key.strip()] = raw_value.strip()
-    return headers
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -103,32 +66,6 @@ def _coerce_float(value: Any, default: float) -> float:
         return default
 
 
-def _normalize_command(value: Any) -> Optional[Sequence[str]]:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return tuple(shlex.split(value))
-    if isinstance(value, Sequence):
-        normalized = []
-        for item in value:
-            if item is None:
-                continue
-            normalized.append(str(item))
-        return tuple(normalized)
-    return None
-
-
-def _normalize_headers(value: Any) -> Optional[Mapping[str, str]]:
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        return {str(key): str(val) for key, val in value.items()}
-    if isinstance(value, str):
-        result = _parse_headers(value)
-        return result or None
-    return None
-
-
 def _normalize_tool_whitelist(value: Any) -> Optional[Sequence[str]]:
     if value is None:
         return None
@@ -148,78 +85,6 @@ def _normalize_tool_whitelist(value: Any) -> Optional[Sequence[str]]:
                 items.append(text)
         return tuple(items) if items else None
     return None
-
-
-def _normalize_env(value: Any) -> Optional[Mapping[str, str]]:
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        return {str(key): str(val) for key, val in value.items()}
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError as exc:  # pragma: no cover - configuration error
-            raise ValueError(
-                "Environment overrides must be provided as JSON when using string values."
-            ) from exc
-        if isinstance(parsed, Mapping):
-            return {str(key): str(val) for key, val in parsed.items()}
-    return None
-
-
-def _load_config_file(path: str) -> Mapping[str, Any]:
-    expanded = os.path.expanduser(path)
-    if not os.path.exists(expanded):
-        raise FileNotFoundError(f"MCP config file not found: {path}")
-
-    with open(expanded, "r", encoding="utf-8") as handle:
-        text = handle.read()
-
-    lower_path = expanded.lower()
-    if lower_path.endswith((".yaml", ".yml")):
-        try:
-            import yaml  # type: ignore[import]
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise ImportError(
-                "PyYAML is required to parse YAML MCP configs. Install it with `pip install pyyaml` "
-                "or provide a JSON config file."
-            ) from exc
-        data = yaml.safe_load(text)  # type: ignore[arg-type]
-    else:
-        data = json.loads(text)
-
-    if not isinstance(data, Mapping):
-        raise ValueError(f"MCP config file {path} must contain a JSON/YAML object.")
-
-    return data
-
-
-def _select_config_section(data: Mapping[str, Any], server_prefix: str) -> Mapping[str, Any]:
-    if not isinstance(data, Mapping):
-        return {}
-
-    candidates = [
-        server_prefix,
-        server_prefix.lower(),
-        server_prefix.upper(),
-        server_prefix.lower().replace("_", ""),
-        server_prefix.lower().replace("_", "-"),
-    ]
-    containers = [data]
-    for container_key in ("servers", "mcp_servers", "mcp"):
-        container = data.get(container_key)
-        if isinstance(container, Mapping):
-            containers.append(container)
-
-    for container in containers:
-        if not isinstance(container, Mapping):
-            continue
-        for key in candidates:
-            value = container.get(key)
-            if isinstance(value, Mapping):
-                return value
-
-    return data
 
 
 _JSON_TYPE_TO_PYTHON: Dict[str, Any] = {
@@ -352,13 +217,7 @@ def _ensure_logger_configured() -> None:
 class MCPRegistrationConfig:
     """Runtime options for discovering and binding MCP tools."""
 
-    transport: str = "stdio"
-    command: Optional[Sequence[str]] = field(default=None)
-    env: Optional[Mapping[str, str]] = field(default=None)
-    cwd: Optional[str] = field(default=None)
-    sse_url: Optional[str] = field(default=None)
-    http_url: Optional[str] = field(default=None)
-    headers: Optional[Mapping[str, str]] = field(default=None)
+    url: str = "http://localhost:8080/mcp"
     request_timeout: float = 10.0
     sse_read_timeout: float = 300.0
     tool_whitelist: Optional[Sequence[str]] = field(default=None)
@@ -368,119 +227,26 @@ class MCPRegistrationConfig:
     @classmethod
     def from_environment(cls, *, server_prefix: str = "DB_MCP") -> "MCPRegistrationConfig":
         env = os.environ
-        config_path = env.get(f"{server_prefix}_CONFIG") or env.get("MCP_CONFIG_FILE")
-        config_section: Mapping[str, Any] = {}
-        if config_path:
-            config_data = _load_config_file(config_path)
-            config_section = _select_config_section(config_data, server_prefix)
+        enabled = _str_to_bool(env.get(f"{server_prefix}_ENABLED"), default=True)
 
-        enabled_default = _coerce_bool(config_section.get("enabled"), True)
-        enabled = _str_to_bool(env.get(f"{server_prefix}_ENABLED"), default=enabled_default)
+        url_value = env.get(f"{server_prefix}_URL")
+        url = str(url_value) if url_value else "http://localhost:8080/mcp"
 
-        command_env_value = env.get(f"{server_prefix}_COMMAND") or env.get("MCP_COMMAND")
-        command_config_value = (
-            config_section.get("command")
-            or config_section.get("stdio_command")
-        )
-        command = _normalize_command(command_env_value or command_config_value)
+        tool_whitelist = _normalize_tool_whitelist(env.get(f"{server_prefix}_TOOLS"))
 
-        cwd_value = env.get(f"{server_prefix}_CWD") or config_section.get("cwd") or config_section.get("working_dir")
-        cwd = os.path.expanduser(cwd_value) if isinstance(cwd_value, str) else None
-
-        http_url_value = (
-            env.get(f"{server_prefix}_HTTP_URL")
-            or env.get(f"{server_prefix}_STREAMABLE_HTTP_URL")
-            or env.get("MCP_HTTP_URL")
-            or env.get("MCP_STREAMABLE_HTTP_URL")
-            or config_section.get("http_url")
-            or config_section.get("streamable_http_url")
-            or config_section.get("streamable_url")
-        )
-        http_url = str(http_url_value) if http_url_value else None
-
-        sse_url_value = (
-            env.get(f"{server_prefix}_SSE_URL")
-            or env.get("MCP_SSE_URL")
-            or config_section.get("sse_url")
-            or config_section.get("url")
-        )
-        sse_url = str(sse_url_value) if sse_url_value else None
-
-        headers_env_value = env.get(f"{server_prefix}_SSE_HEADERS") or env.get("MCP_SSE_HEADERS")
-        headers = _normalize_headers(headers_env_value) if headers_env_value else None
-        if headers is None:
-            headers = _normalize_headers(
-                config_section.get("headers")
-                or config_section.get("sse_headers")
-            )
-
-        whitelist_env_value = env.get(f"{server_prefix}_TOOLS")
-        tool_whitelist = _normalize_tool_whitelist(whitelist_env_value)
-        if tool_whitelist is None:
-            tool_whitelist = _normalize_tool_whitelist(
-                config_section.get("tools")
-                or config_section.get("tool_whitelist")
-            )
-
-        transport_env_value = env.get(f"{server_prefix}_TRANSPORT") or env.get("MCP_TRANSPORT")
-        transport_config_value = config_section.get("transport") or config_section.get("connection")
-        if transport_env_value:
-            transport = transport_env_value.strip().lower()
-        elif transport_config_value:
-            transport = str(transport_config_value).strip().lower()
-        elif http_url:
-            transport = "streamable_http"
-        elif sse_url:
-            transport = "sse"
-        elif command:
-            transport = "stdio"
-        else:
-            transport = "stdio"
-
-        transport = transport.replace("-", "_")
-        if transport in {"http", "streamablehttp"}:
-            transport = "streamable_http"
-
-        if transport not in {"stdio", "sse", "streamable_http"}:
-            transport = "stdio"
-
-        request_default = _coerce_float(
-            config_section.get("timeout")
-            or config_section.get("request_timeout"),
-            10.0,
-        )
         request_timeout = _coerce_float(
             env.get(f"{server_prefix}_TIMEOUT") or env.get("MCP_TIMEOUT"),
-            request_default,
-        )
-
-        sse_read_default = _coerce_float(
-            config_section.get("sse_read_timeout")
-            or config_section.get("read_timeout"),
-            300.0,
+            10.0,
         )
         sse_read_timeout = _coerce_float(
-            env.get(f"{server_prefix}_SSE_READ_TIMEOUT") or env.get("MCP_SSE_READ_TIMEOUT"),
-            sse_read_default,
+            env.get(f"{server_prefix}_READ_TIMEOUT") or env.get("MCP_READ_TIMEOUT"),
+            300.0,
         )
 
-        raise_default = _coerce_bool(
-            config_section.get("raise_on_error")
-            or config_section.get("strict"),
-            False,
-        )
-        raise_on_error = _str_to_bool(env.get(f"{server_prefix}_STRICT"), default=raise_default)
-
-        env_overrides = _normalize_env(config_section.get("env"))
+        raise_on_error = _str_to_bool(env.get(f"{server_prefix}_STRICT"), default=False)
 
         return cls(
-            transport=transport,
-            command=command,
-            env=env_overrides,
-            cwd=cwd,
-            sse_url=sse_url,
-            http_url=http_url,
-            headers=headers,
+            url=url,
             request_timeout=request_timeout,
             sse_read_timeout=sse_read_timeout,
             tool_whitelist=tool_whitelist,
@@ -510,69 +276,18 @@ async def _connect_transport(cfg: MCPRegistrationConfig):
             "Install it with `pip install modelcontextprotocol`."
         )
 
-    if cfg.transport == "streamable_http":
-        if streamablehttp_client is None:
-            raise ImportError(
-                "The installed `mcp` package does not support Streamable HTTP. "
-                "Upgrade with `pip install --upgrade modelcontextprotocol`."
-            )
-        url = cfg.http_url or cfg.sse_url
-        if not url:
-            raise ValueError(
-                "MCP Streamable HTTP transport requires a URL. "
-                "Set DB_MCP_HTTP_URL (or MCP_HTTP_URL)."
-            )
-
-        headers = dict(cfg.headers) if cfg.headers is not None else None
-        async with streamablehttp_client(
-            url,
-            headers=headers,
-            timeout=cfg.request_timeout,
-            sse_read_timeout=cfg.sse_read_timeout,
-        ) as streams:
-            read_stream, write_stream, _ = streams
-            yield read_stream, write_stream
-            return
-
-    if cfg.transport == "sse":
-        if sse_client is None:
-            raise ImportError(
-                "The installed `mcp` package does not support SSE transport. "
-                "Upgrade with `pip install --upgrade modelcontextprotocol`."
-            )
-        if not cfg.sse_url:
-            raise ValueError("MCP SSE transport requires a URL. Set DB_MCP_SSE_URL or MCP_SSE_URL.")
-
-        headers = dict(cfg.headers) if cfg.headers is not None else None
-        async with sse_client(
-            cfg.sse_url,
-            headers=headers,
-            timeout=cfg.request_timeout,
-            sse_read_timeout=cfg.sse_read_timeout,
-        ) as streams:
-            yield streams
-            return
-
-    if stdio_client is None or StdioServerParameters is None:
+    if streamablehttp_client is None:
         raise ImportError(
-            "The installed `mcp` package does not support stdio transport. "
+            "The installed `mcp` package does not support Streamable HTTP. "
             "Upgrade with `pip install --upgrade modelcontextprotocol`."
         )
-    if not cfg.command:
-        raise ValueError(
-            "MCP stdio transport requires a launch command. "
-            "Set DB_MCP_COMMAND (or MCP_COMMAND) to the executable for your db-mcp-server."
-        )
-    command = list(cfg.command)
-
-    server = StdioServerParameters(
-        command=command[0],
-        args=command[1:],
-        env=dict(cfg.env) if cfg.env is not None else None,
-        cwd=cfg.cwd,
-    )
-    async with stdio_client(server) as streams:
-        yield streams
+    async with streamablehttp_client(
+        cfg.url,
+        timeout=cfg.request_timeout,
+        sse_read_timeout=cfg.sse_read_timeout,
+    ) as streams:
+        read_stream, write_stream, _ = streams
+        yield read_stream, write_stream
 
 
 async def _list_mcp_tools(cfg: MCPRegistrationConfig):
@@ -766,13 +481,8 @@ def register_db_mcp_tools(
         return llm, None
 
     LOGGER.info(
-        "Attempting MCP registration via %s transport%s",
-        config.transport,
-        (
-            f" ({config.http_url or config.sse_url})"
-            if config.transport in {"sse", "streamable_http"} and (config.http_url or config.sse_url)
-            else ""
-        ),
+        "Attempting MCP registration via streamable_http (%s)",
+        config.url,
     )
 
     try:
@@ -802,18 +512,11 @@ def register_db_mcp_tools(
     setattr(bound, "_mcp_context", context)
 
     tool_names = ", ".join(sorted(tool.get("name", "<unnamed>") for tool in specs))
-    location_hint = ""
-    if config.transport == "streamable_http" and (config.http_url or config.sse_url):
-        location_hint = f" (streamable HTTP {config.http_url or config.sse_url})"
-    elif config.transport == "sse" and config.sse_url:
-        location_hint = f" (SSE {config.sse_url})"
-    elif config.transport == "stdio" and config.command:
-        location_hint = f" (stdio command: {' '.join(config.command)})"
+    location_hint = f" (streamable HTTP {config.url})"
 
     LOGGER.info(
-        "Registered %d MCP tool(s) from db-mcp-server via %s transport%s: %s",
+        "Registered %d MCP tool(s) from db-mcp-server via streamable_http%s: %s",
         len(specs),
-        config.transport,
         location_hint,
         tool_names,
     )
@@ -823,7 +526,7 @@ def register_db_mcp_tools(
             {
                 "metadata": {
                     "mcp_server": "db-mcp-server",
-                    "mcp_transport": config.transport,
+                    "mcp_transport": "streamable_http",
                     "mcp_tool_specs": specs,
                 }
             }

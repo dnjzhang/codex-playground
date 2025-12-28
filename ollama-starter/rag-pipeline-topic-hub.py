@@ -24,12 +24,14 @@ Notes:
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import logging
 import math
 import os
 import threading
 import uuid
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Sequence, Tuple, TypedDict
 
@@ -47,7 +49,12 @@ from provider_lib import (
     init_embedding_function,
     load_oci_config_data,
 )
-from observability.otel import ObservabilityManager, init_observability
+from observability.otel import (
+    ObservabilityManager,
+    init_observability,
+    new_run_id,
+    utc_now_iso,
+)
 from mcp_registration import MCPToolContext
 from pydantic import BaseModel, Field
 
@@ -109,6 +116,14 @@ class SessionRuntime:
     observability: ObservabilityManager | None
 
     def run_query(self, question: str) -> ChatResult:
+        run_id = new_run_id()
+        run_span = (
+            self.observability.span_for_run(run_id)
+            if self.observability
+            else nullcontext()
+        )
+        start_timestamp = utc_now_iso()
+        start_perf = time.perf_counter()
         history_messages = list(self.conversation_memory.messages)
         state: QAState = {
             "question": question,
@@ -119,31 +134,55 @@ class SessionRuntime:
         if self.config.debug:
             print("[debug] run_query question:", question)
             print("[debug] run_query history message count:", len(history_messages))
-        result = self.app.invoke(state)
-        answer_raw = result.get("answer", "")
-        answer = answer_raw if isinstance(answer_raw, str) else str(answer_raw)
+        answer = ""
+        with run_span:
+            try:
+                result = self.app.invoke(state)
+                answer_raw = result.get("answer", "")
+                answer = answer_raw if isinstance(answer_raw, str) else str(answer_raw)
 
-        context_docs: List[Document] = result.get("context", []) or []
-        sources: List[Dict[str, Any]] = []
-        if self.config.show_sources:
-            for doc in context_docs:
-                src = doc.metadata.get("source", "?")
-                page = doc.metadata.get("page", "?")
-                rerank_score = doc.metadata.get("rerank_score")
-                similarity_score = doc.metadata.get("similarity_score")
-                source_info: Dict[str, Any] = {
-                    "source": src,
-                    "page": page,
-                }
-                if rerank_score is not None:
-                    source_info["rerank_score"] = float(rerank_score)
-                if similarity_score is not None:
-                    source_info["similarity_score"] = float(similarity_score)
-                sources.append(source_info)
+                context_docs: List[Document] = result.get("context", []) or []
+                sources: List[Dict[str, Any]] = []
+                if self.config.show_sources:
+                    for doc in context_docs:
+                        src = doc.metadata.get("source", "?")
+                        page = doc.metadata.get("page", "?")
+                        rerank_score = doc.metadata.get("rerank_score")
+                        similarity_score = doc.metadata.get("similarity_score")
+                        source_info: Dict[str, Any] = {
+                            "source": src,
+                            "page": page,
+                        }
+                        if rerank_score is not None:
+                            source_info["rerank_score"] = float(rerank_score)
+                        if similarity_score is not None:
+                            source_info["similarity_score"] = float(similarity_score)
+                        sources.append(source_info)
 
-        self.conversation_memory.add_user_message(question)
-        self.conversation_memory.add_ai_message(answer)
-        return ChatResult(answer=answer, sources=sources, context_docs=context_docs)
+                self.conversation_memory.add_user_message(question)
+                self.conversation_memory.add_ai_message(answer)
+                if self.observability:
+                    elapsed_ms = (time.perf_counter() - start_perf) * 1000
+                    self.observability.log_response(
+                        run_id,
+                        question,
+                        answer,
+                        start_timestamp=start_timestamp,
+                        elapsed_ms=elapsed_ms,
+                    )
+                return ChatResult(answer=answer, sources=sources, context_docs=context_docs)
+            except Exception as exc:  # noqa: BLE001
+                if self.observability:
+                    elapsed_ms = (time.perf_counter() - start_perf) * 1000
+                    self.observability.log_error(
+                        run_id,
+                        question,
+                        answer,
+                        exc,
+                        start_timestamp=start_timestamp,
+                        elapsed_ms=elapsed_ms,
+                    )
+                raise
 
     def inspect(self, query: str) -> Dict[str, List[Dict[str, Any]]]:
         docs_scores = self.vector_store.similarity_search_with_score(query, k=self.config.k)
@@ -293,27 +332,9 @@ def _load_db_metadata(persist_dir: str) -> Dict | None:
 def _apply_default_mcp_settings(enable_mcp: bool) -> None:
     if not enable_mcp:
         return
-    if os.getenv("DB_MCP_TRANSPORT") or os.getenv("MCP_TRANSPORT"):
+    if os.getenv("DB_MCP_URL"):
         return
-    if os.getenv("DB_MCP_CONFIG") or os.getenv("MCP_CONFIG_FILE"):
-        return
-    if os.getenv("DB_MCP_COMMAND") or os.getenv("MCP_COMMAND"):
-        return
-
-    http_url = (
-        os.getenv("DB_MCP_HTTP_URL")
-        or os.getenv("MCP_HTTP_URL")
-        or os.getenv("DB_MCP_STREAMABLE_HTTP_URL")
-        or os.getenv("MCP_STREAMABLE_HTTP_URL")
-    )
-    sse_url = os.getenv("DB_MCP_SSE_URL") or os.getenv("MCP_SSE_URL")
-
-    if sse_url:
-        os.environ.setdefault("DB_MCP_TRANSPORT", "sse")
-        return
-
-    os.environ.setdefault("DB_MCP_TRANSPORT", "streamable_http")
-    os.environ.setdefault("DB_MCP_HTTP_URL", http_url or DEFAULT_MCP_STREAMABLE_HTTP_URL)
+    os.environ.setdefault("DB_MCP_URL", DEFAULT_MCP_STREAMABLE_HTTP_URL)
 
 
 def rerank_documents(
