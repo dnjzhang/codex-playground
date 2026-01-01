@@ -72,16 +72,46 @@ def plot_cd_interest(csv_path: str, *, date_format: str | None = "%m/%d/%Y") -> 
         print("No monthly interest totals found. Nothing to plot.")
         return
 
+    def format_k(amount: float) -> str:
+        return f"${amount / 1000:,.1f}K"
+
     cumulative_interest = monthly_interest.groupby(monthly_interest.index.year).cumsum()
 
     fig_width = max(10, len(monthly_interest) * 0.55)
-    ax = cumulative_interest.plot.bar(legend=False, figsize=(fig_width, 6))
+    fig, ax = plt.subplots(figsize=(fig_width, 6))
+    x_positions = range(len(cumulative_interest))
+    monthly_colors = ["tab:orange"] * len(monthly_interest)
+    for _, group in monthly_interest.groupby(monthly_interest.index.year):
+        if group.empty:
+            continue
+        max_idx = group.idxmax()
+        min_idx = group.idxmin()
+        max_pos = monthly_interest.index.get_loc(max_idx)
+        min_pos = monthly_interest.index.get_loc(min_idx)
+        if max_pos == min_pos:
+            monthly_colors[max_pos] = "tab:green"
+            continue
+        monthly_colors[max_pos] = "tab:green"
+        monthly_colors[min_pos] = "tab:red"
+    cumulative_bars = ax.bar(
+        x_positions,
+        cumulative_interest.values,
+        width=0.8,
+        color="tab:blue",
+        zorder=1,
+    )
+    ax.bar(
+        x_positions,
+        monthly_interest.values,
+        width=0.35,
+        color=monthly_colors,
+        zorder=2,
+    )
     ax.set_xlabel("Month")
     ax.set_ylabel("Accumulated Interest ($)")
     ax.set_title(f"Accumulated CD Interest as of {date.today().isoformat()}")
 
-    bars = ax.containers[0]
-    for idx, bar in enumerate(bars):
+    for idx, bar in enumerate(cumulative_bars):
         if bar.get_height() <= 0:
             continue
         month_value = monthly_interest.iloc[idx]
@@ -89,7 +119,7 @@ def plot_cd_interest(csv_path: str, *, date_format: str | None = "%m/%d/%Y") -> 
         x_center = bar.get_x() + bar.get_width() / 2
         y_top = bar.get_height()
         ax.annotate(
-            f"${running_total:,.0f}\n(${month_value:,.0f})",
+            f"{format_k(running_total)}\n({format_k(month_value)})",
             (x_center, y_top),
             textcoords="offset points",
             xytext=(0, 6),
@@ -101,11 +131,11 @@ def plot_cd_interest(csv_path: str, *, date_format: str | None = "%m/%d/%Y") -> 
         )
 
     ax.margins(y=0.10)
-    n_bars = len(bars)
+    n_bars = len(cumulative_bars)
     if n_bars:
         ax.set_xlim(-1, n_bars)
 
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: f"${x:,.0f}"))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: format_k(x)))
 
     tick_positions = range(len(monthly_interest.index))
     tick_labels = [d.strftime("%Y-%m") for d in monthly_interest.index.to_timestamp("M")]
