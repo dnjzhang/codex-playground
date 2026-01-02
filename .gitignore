@@ -183,6 +183,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+*.tsbuildinfo
 topic-hub-web/node_modules/
 topic-hub-web/dist/
 .chroma
