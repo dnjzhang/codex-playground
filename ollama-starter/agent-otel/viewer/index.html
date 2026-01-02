@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <base href="/" />
+    <title>OTel Signal Viewer</title>
+    <link rel="stylesheet" href="/viewer/styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <h1>OTel Signal Viewer</h1>
+        <p class="subhead">Reads OTLP file exports from <code>agent-otel/otel-out</code>.</p>
+      </div>
+      <div class="header-actions">
+        <button id="reloadBtn" type="button">Reload All</button>
+        <div class="status" id="status">Idle</div>
+      </div>
+    </header>
+
+    <main>
+      <section class="signal-section">
+        <div class="section-header">
+          <h2>Logs</h2>
+          <div class="section-actions">
+            <span class="summary" id="logsSummary"></span>
+            <button class="reload-btn" type="button" data-load="logs">Reload</button>
+            <button
+              class="toggle-btn"
+              type="button"
+              data-target="logsTableContainer"
+              aria-expanded="true"
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+        <div class="table-controls">
+          <div class="filter-group">
+            <span class="label">Filter</span>
+            <label>
+              <input type="radio" name="logsFilterMode" value="all" checked />
+              All
+            </label>
+            <label>
+              <input type="radio" name="logsFilterMode" value="last" />
+              Last
+            </label>
+            <input id="logsLimitInput" type="number" min="1" value="200" />
+          </div>
+        </div>
+        <div class="table-container" id="logsTableContainer">
+          <table id="logsTable">
+            <thead>
+              <tr>
+                <th>Run ID</th>
+                <th>Type</th>
+                <th>Question</th>
+                <th>Answer</th>
+                <th>Start</th>
+                <th>Complete</th>
+                <th>Elapsed (ms)</th>
+                <th>Error Kind</th>
+                <th>Error Stage</th>
+                <th>Error Message</th>
+                <th>Error Retryable</th>
+                <th>Question Hash</th>
+                <th>Answer Hash</th>
+                <th>Time</th>
+                <th>Severity</th>
+                <th>Trace ID</th>
+                <th>Span ID</th>
+                <th>Attributes</th>
+              </tr>
+              <tr class="filter-row">
+                <th><input type="text" data-column="runId" placeholder="Filter run" /></th>
+                <th><input type="text" data-column="type" placeholder="Filter type" /></th>
+                <th><input type="text" data-column="question" placeholder="Filter question" /></th>
+                <th><input type="text" data-column="answer" placeholder="Filter answer" /></th>
+                <th><input type="text" data-column="startTimestamp" placeholder="Filter start" /></th>
+                <th><input type="text" data-column="completeTimestamp" placeholder="Filter complete" /></th>
+                <th><input type="text" data-column="elapsedMs" placeholder="Filter elapsed" /></th>
+                <th><input type="text" data-column="errorKind" placeholder="Filter err kind" /></th>
+                <th><input type="text" data-column="errorStage" placeholder="Filter err stage" /></th>
+                <th><input type="text" data-column="errorMessage" placeholder="Filter err msg" /></th>
+                <th><input type="text" data-column="errorRetryable" placeholder="Filter retry" /></th>
+                <th><input type="text" data-column="questionHash" placeholder="Filter q hash" /></th>
+                <th><input type="text" data-column="answerHash" placeholder="Filter a hash" /></th>
+                <th><input type="text" data-column="time" placeholder="Filter time" /></th>
+                <th><input type="text" data-column="severity" placeholder="Filter severity" /></th>
+                <th><input type="text" data-column="traceId" placeholder="Filter trace" /></th>
+                <th><input type="text" data-column="spanId" placeholder="Filter span" /></th>
+                <th><input type="text" data-column="attributes" placeholder="Filter attrs" /></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="signal-section">
+        <div class="section-header">
+          <h2>Metrics</h2>
+          <div class="section-actions">
+            <span class="summary" id="metricsSummary"></span>
+            <button class="reload-btn" type="button" data-load="metrics">Reload</button>
+            <button
+              class="toggle-btn"
+              type="button"
+              data-target="metricsTableContainer"
+              aria-expanded="true"
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+        <div class="table-controls">
+          <div class="filter-group">
+            <span class="label">Filter</span>
+            <label>
+              <input type="radio" name="metricsFilterMode" value="all" checked />
+              All
+            </label>
+            <label>
+              <input type="radio" name="metricsFilterMode" value="last" />
+              Last
+            </label>
+            <input id="metricsLimitInput" type="number" min="1" value="200" />
+          </div>
+        </div>
+        <div class="table-container" id="metricsTableContainer">
+          <table id="metricsTable">
+            <thead>
+              <tr>
+                <th>Run ID</th>
+                <th>Time</th>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Value</th>
+                <th>Unit</th>
+                <th>Description</th>
+                <th>Attributes</th>
+              </tr>
+              <tr class="filter-row">
+                <th><input type="text" data-column="runId" placeholder="Filter run" /></th>
+                <th><input type="text" data-column="time" placeholder="Filter time" /></th>
+                <th><input type="text" data-column="name" placeholder="Filter name" /></th>
+                <th><input type="text" data-column="type" placeholder="Filter type" /></th>
+                <th><input type="text" data-column="value" placeholder="Filter value" /></th>
+                <th><input type="text" data-column="unit" placeholder="Filter unit" /></th>
+                <th><input type="text" data-column="description" placeholder="Filter desc" /></th>
+                <th><input type="text" data-column="attributes" placeholder="Filter attrs" /></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="signal-section">
+        <div class="section-header">
+          <h2>Traces</h2>
+          <div class="section-actions">
+            <span class="summary" id="tracesSummary"></span>
+            <button class="reload-btn" type="button" data-load="traces">Reload</button>
+            <button
+              class="toggle-btn"
+              type="button"
+              data-target="tracesTableContainer"
+              aria-expanded="true"
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+        <div class="table-controls">
+          <div class="filter-group">
+            <span class="label">Filter</span>
+            <label>
+              <input type="radio" name="tracesFilterMode" value="all" checked />
+              All
+            </label>
+            <label>
+              <input type="radio" name="tracesFilterMode" value="last" />
+              Last
+            </label>
+            <input id="tracesLimitInput" type="number" min="1" value="200" />
+          </div>
+        </div>
+        <div class="table-container" id="tracesTableContainer">
+          <table id="tracesTable">
+            <thead>
+              <tr>
+                <th>Run ID</th>
+                <th>Start</th>
+                <th>Name</th>
+                <th>Duration (ms)</th>
+                <th>Status</th>
+                <th>Trace ID</th>
+                <th>Span ID</th>
+                <th>Parent</th>
+                <th>Service</th>
+                <th>Scope</th>
+              </tr>
+              <tr class="filter-row">
+                <th><input type="text" data-column="runId" placeholder="Filter run" /></th>
+                <th><input type="text" data-column="startTime" placeholder="Filter start" /></th>
+                <th><input type="text" data-column="name" placeholder="Filter name" /></th>
+                <th><input type="text" data-column="durationMs" placeholder="Filter duration" /></th>
+                <th><input type="text" data-column="status" placeholder="Filter status" /></th>
+                <th><input type="text" data-column="traceId" placeholder="Filter trace" /></th>
+                <th><input type="text" data-column="spanId" placeholder="Filter span" /></th>
+                <th><input type="text" data-column="parentSpanId" placeholder="Filter parent" /></th>
+                <th><input type="text" data-column="service" placeholder="Filter service" /></th>
+                <th><input type="text" data-column="scope" placeholder="Filter scope" /></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/viewer/dist/app.js"></script>
+  </body>
+</html>

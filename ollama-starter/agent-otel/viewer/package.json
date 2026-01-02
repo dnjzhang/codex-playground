@@ -1,0 +1,13 @@
+{
+  "name": "otel-signal-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "serve": "python3 -m http.server 8000 -d .."
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
