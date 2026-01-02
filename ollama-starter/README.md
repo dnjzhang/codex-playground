@@ -86,6 +86,7 @@ After installation, start the service with `ollama serve` and keep it running wh
 - `--show-sources` prints retrieved context metadata.
 - `--inspect "…" ` inspects vector and reranker scores without generating an answer.
 - `--disable-mcp` skips MCP tool registration if you want a pure vector-RAG run.
+- `--retriever-tool-max-calls` caps per-run calls to the local `search_cpp_log_definition` tool (defaults to 50).
 - Graph visualization: `--graph-diagram path/to/diagram.png` exports the LangGraph structure (requires a Mermaid rendering backend).
 
 ## FastAPI Server
@@ -106,6 +107,14 @@ Provide the Streamable HTTP endpoint for the server (defaults to `http://localho
 export DB_MCP_URL=http://localhost:8080/mcp
 # Optional: limit which tools are exposed
 # export DB_MCP_TOOLS=searchLog,anotherTool
+```
+
+## Local Retrieval Tool
+The pipeline exposes a local tool named `search_cpp_log_definition` so the LLM can look up CPP log definitions on demand (even when MCP is disabled). The tool accepts `{ "query": "...", "k": 3 }` and returns full document payloads from the topic vector store (reranking is applied when enabled).
+
+Limit how many times the tool can be called per run:
+```bash
+export RETRIEVER_TOOL_MAX_CALLS=50
 ```
 
 ## Observability (OpenTelemetry + OpenInference)

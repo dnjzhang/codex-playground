@@ -199,6 +199,10 @@ def _spec_to_structured_tool(spec: Mapping[str, Any]) -> StructuredTool:
     )
 
 
+def build_structured_tools_from_specs(specs: Sequence[Mapping[str, Any]]) -> List[StructuredTool]:
+    return [_spec_to_structured_tool(spec) for spec in specs]
+
+
 def _ensure_logger_configured() -> None:
     """Attach a fallback handler so INFO-level messages surface by default."""
 
@@ -552,4 +556,5 @@ __all__ = [
     "load_mcp_tool_specs",
     "register_db_mcp_tools",
     "MCPToolContext",
+    "build_structured_tools_from_specs",
 ]

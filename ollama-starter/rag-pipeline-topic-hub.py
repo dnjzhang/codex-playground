@@ -55,8 +55,12 @@ from observability.otel import (
     new_run_id,
     utc_now_iso,
 )
-from mcp_registration import MCPToolContext
+from mcp_registration import MCPToolContext, build_structured_tools_from_specs
+from tools.retriever_tool import build_retriever_tool
 from pydantic import BaseModel, Field
+
+DEFAULT_MCP_STREAMABLE_HTTP_URL = "http://localhost:8080/mcp"
+DEFAULT_RETRIEVER_TOOL_MAX_CALLS = 50
 
 
 class QAState(TypedDict, total=False):
@@ -89,6 +93,7 @@ class PipelineConfig:
     show_sources: bool = False
     debug: bool = False
     enable_mcp: bool = True
+    retriever_tool_max_calls: int = DEFAULT_RETRIEVER_TOOL_MAX_CALLS
 
 
 @dataclass
@@ -99,7 +104,6 @@ class ChatResult:
 
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_MCP_STREAMABLE_HTTP_URL = "http://localhost:8080/mcp"
 
 
 @dataclass
@@ -272,6 +276,11 @@ class SessionCreatePayload(BaseModel):
     debug: bool = Field(False, description="Enable debug logging")
     graph_diagram: str | None = Field(None, description="Optional path to save the compiled LangGraph structure as a PNG image")
     enable_mcp: bool = Field(True, description="Enable registration and use of MCP tools")
+    retriever_tool_max_calls: int = Field(
+        DEFAULT_RETRIEVER_TOOL_MAX_CALLS,
+        description="Maximum number of retriever tool calls per run",
+        ge=0,
+    )
 
     def to_pipeline_config(self) -> PipelineConfig:
         return PipelineConfig(
@@ -296,6 +305,7 @@ class SessionCreatePayload(BaseModel):
             show_sources=self.show_sources,
             debug=self.debug,
             enable_mcp=self.enable_mcp,
+            retriever_tool_max_calls=self.retriever_tool_max_calls,
         )
 
 
@@ -335,6 +345,16 @@ def _apply_default_mcp_settings(enable_mcp: bool) -> None:
     if os.getenv("DB_MCP_URL"):
         return
     os.environ.setdefault("DB_MCP_URL", DEFAULT_MCP_STREAMABLE_HTTP_URL)
+
+
+def _read_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def rerank_documents(
@@ -509,12 +529,21 @@ def build_qa_graph(
     system_preamble: str | None = None,
     debug: bool = False,
     mcp_context: MCPToolContext | None = None,
+    retriever_tool=None,
+    retriever_tool_max_calls: int = DEFAULT_RETRIEVER_TOOL_MAX_CALLS,
     observability: ObservabilityManager | None = None,
 ):
     system_text = system_preamble or (
         "You are a helpful assistant. Use the provided context to answer "
         "the user's question concisely. If the answer is unknown, say so.  Use tools only related to questions about CPP application."
     )
+
+    if retriever_tool:
+        system_text += (
+            "\n\nYou can optionally call the tool "
+            f"'{retriever_tool.name}' to search CPP log definitions. "
+            "Use it to enrich or interpret log messages when needed."
+        )
 
     if mcp_context:
         tool_names = ", ".join(mcp_context.list_tool_names()) or "(none)"
@@ -620,15 +649,12 @@ def build_qa_graph(
         else:
             response = llm.invoke(conversation)
         tool_ctx = mcp_context or getattr(llm, "_mcp_context", None)
+        retriever_tool_name = getattr(retriever_tool, "name", None) if retriever_tool else None
+        max_tool_calls = max(0, retriever_tool_max_calls)
+        tool_calls_used = 0
         iterations = 0
 
         while isinstance(response, AIMessage) and getattr(response, "tool_calls", None):
-            if not tool_ctx:
-                LOGGER.warning(
-                    "LLM requested MCP tool call but no MCP context is available; skipping tool execution."
-                )
-                break
-
             tool_messages: List[ToolMessage] = []
             for call in response.tool_calls:
                 call_name = getattr(call, "name", None) or call.get("name")  # type: ignore[arg-type]
@@ -645,19 +671,48 @@ def build_qa_graph(
                     args_preview = str(raw_args)
                 if len(args_preview) > 200:
                     args_preview = f"{args_preview[:197]}..."
-                LOGGER.info("MCP tool requested: %s args=%s", call_name, args_preview)
+                LOGGER.info("Tool requested: %s args=%s", call_name, args_preview)
                 if observability:
                     observability.record_tool_call(str(call_name))
-                try:
-                    result_text = tool_ctx.call_tool(str(call_name), dict(raw_args))
-                except Exception as exc:  # noqa: BLE001 - surface tool errors to the model
-                    LOGGER.warning("MCP tool %s raised an error: %s", call_name, exc)
-                    result_text = f"Tool {call_name} failed: {exc}"
+                if retriever_tool_name and str(call_name) == retriever_tool_name:
+                    if tool_calls_used >= max_tool_calls:
+                        LOGGER.warning(
+                            "Retriever tool call limit reached (%d); skipping %s.",
+                            max_tool_calls,
+                            call_name,
+                        )
+                        result_text = f"Tool {call_name} skipped: per-run call limit reached."
+                    else:
+                        tool_calls_used += 1
+                        try:
+                            tool_result = retriever_tool.invoke(dict(raw_args))
+                        except Exception as exc:  # noqa: BLE001
+                            LOGGER.warning("Retriever tool %s raised an error: %s", call_name, exc)
+                            result_text = f"Tool {call_name} failed: {exc}"
+                        else:
+                            result_text = tool_result if isinstance(tool_result, str) else str(tool_result)
+                elif tool_ctx:
+                    try:
+                        result_text = tool_ctx.call_tool(str(call_name), dict(raw_args))
+                    except Exception as exc:  # noqa: BLE001 - surface tool errors to the model
+                        LOGGER.warning("MCP tool %s raised an error: %s", call_name, exc)
+                        result_text = f"Tool {call_name} failed: {exc}"
+                    else:
+                        preview = result_text.strip()
+                        if len(preview) > 200:
+                            preview = f"{preview[:197]}..."
+                        LOGGER.info(
+                            "MCP tool %s returned %s characters: %s",
+                            call_name,
+                            len(result_text),
+                            preview,
+                        )
                 else:
-                    preview = result_text.strip()
-                    if len(preview) > 200:
-                        preview = f"{preview[:197]}..."
-                    LOGGER.info("MCP tool %s returned %s characters: %s", call_name, len(result_text), preview)
+                    LOGGER.warning(
+                        "Tool call %s requested but no handler is available; skipping.",
+                        call_name,
+                    )
+                    continue
 
                 tool_messages.append(
                     ToolMessage(
@@ -766,6 +821,8 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         raise ValueError("--k must be a positive integer")
     if config.rerank_top_n is not None and config.rerank_top_n <= 0:
         raise ValueError("--rerank-top-n must be a positive integer when provided")
+    if config.retriever_tool_max_calls < 0:
+        raise ValueError("--retriever-tool-max-calls must be zero or a positive integer")
 
     rerank_top_n = _compute_rerank_top_n(config.k, config.rerank_top_n)
 
@@ -804,11 +861,41 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         oci_auth_profile=config.oci_auth_profile,
         enable_mcp=config.enable_mcp,
     )
+    reranker = build_reranker(config.rerank_model)
+    retriever_tool = build_retriever_tool(
+        retriever,
+        reranker=reranker,
+        rerank_top_n=rerank_top_n,
+        observability=observability,
+    )
+
     mcp_context: MCPToolContext | None = None
     if config.enable_mcp:
         mcp_context = getattr(chat_llm, "_mcp_context", None)
 
-    reranker = build_reranker(config.rerank_model)
+    tools_for_binding: List[Any] = []
+    if mcp_context:
+        tools_for_binding.extend(build_structured_tools_from_specs(mcp_context.specs))
+    if retriever_tool:
+        tools_for_binding.append(retriever_tool)
+    if tools_for_binding:
+        if hasattr(chat_llm, "bind_tools"):
+            bound = chat_llm.bind_tools(tools_for_binding)
+            if mcp_context:
+                try:
+                    setattr(bound, "_mcp_context", mcp_context)
+                except Exception:
+                    pass
+                try:
+                    setattr(bound, "_mcp_tool_specs", tuple(mcp_context.specs))
+                except Exception:
+                    pass
+            chat_llm = bound
+        else:
+            LOGGER.warning(
+                "Chat model %s does not support tool binding; skipping local tool registration.",
+                type(chat_llm).__name__,
+            )
 
     app = build_qa_graph(
         chat_llm,
@@ -816,6 +903,8 @@ def initialize_session(config: PipelineConfig) -> SessionRuntime:
         reranker=reranker,
         rerank_top_n=rerank_top_n,
         mcp_context=mcp_context,
+        retriever_tool=retriever_tool,
+        retriever_tool_max_calls=config.retriever_tool_max_calls,
         observability=observability,
         debug=config.debug,
     )
@@ -911,6 +1000,10 @@ def create_api_app() -> Any:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Query/chat with a per-topic Chroma DB using a simple LangGraph QA pipeline.")
+    retriever_tool_default = _read_env_int(
+        "RETRIEVER_TOOL_MAX_CALLS",
+        DEFAULT_RETRIEVER_TOOL_MAX_CALLS,
+    )
     parser.add_argument(
         "--serve-api",
         action="store_true",
@@ -976,6 +1069,12 @@ def main() -> None:
         action="store_true",
         help="Disable MCP tool registration and tool execution for this session",
     )
+    parser.add_argument(
+        "--retriever-tool-max-calls",
+        type=int,
+        default=retriever_tool_default,
+        help="Maximum number of retriever tool calls per run",
+    )
     parser.add_argument("--debug", action="store_true", help="Print debug info about DB + retrieval")
     parser.add_argument("--inspect", default=None, help="Inspect retrieval only: print top docs and scores for a query, then exit")
     parser.add_argument(
@@ -1038,6 +1137,8 @@ def main() -> None:
 
     if args.k <= 0:
         parser.error("--k must be a positive integer")
+    if args.retriever_tool_max_calls < 0:
+        parser.error("--retriever-tool-max-calls must be zero or a positive integer")
     if args.rerank_top_n is not None and args.rerank_top_n <= 0:
         parser.error("--rerank-top-n must be a positive integer")
 
@@ -1066,6 +1167,7 @@ def main() -> None:
         show_sources=args.show_sources,
         debug=args.debug,
         enable_mcp=not args.disable_mcp,
+        retriever_tool_max_calls=args.retriever_tool_max_calls,
     )
 
     try:

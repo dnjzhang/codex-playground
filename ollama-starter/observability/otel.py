@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -10,9 +11,9 @@ import socket
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
-from dataclasses import dataclass, field
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -22,6 +23,10 @@ LOGGER = logging.getLogger(__name__)
 _OBSERVABILITY: "ObservabilityManager | None" = None
 _INIT_LOCK = threading.Lock()
 _QA_LOGGER: logging.Logger | None = None
+_RUN_ID_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "observability_run_id",
+    default=None,
+)
 
 
 def new_run_id() -> str:
@@ -108,6 +113,10 @@ def _extract_usage(response: Any) -> Dict[str, Optional[int]]:
         total = prompt + completion
 
     return {"prompt": prompt, "completion": completion, "total": total}
+
+
+def _current_run_id() -> Optional[str]:
+    return _RUN_ID_CONTEXT.get()
 
 
 def _extract_model_name(response: Any) -> Optional[str]:
@@ -306,6 +315,7 @@ class OTelMetricsCallbackHandler(BaseCallbackHandler):
         usage = _extract_usage(response)
         model_name = _extract_model_name(response)
         attrs = {"model": model_name} if model_name else {}
+        attrs = self._with_run_id(attrs)
 
         if usage["prompt"] is not None:
             self._prompt_tokens.add(usage["prompt"], attrs)
@@ -324,9 +334,10 @@ class OTelMetricsCallbackHandler(BaseCallbackHandler):
         with self._lock:
             start_time = self._retriever_start.pop(str(run_id), None)
 
+        attrs = self._with_run_id({})
         if start_time is not None:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            self._retrieval_latency_ms.record(elapsed_ms)
+            self._retrieval_latency_ms.record(elapsed_ms, attrs)
 
         doc_count = len(documents or [])
         context_chars = 0
@@ -335,12 +346,20 @@ class OTelMetricsCallbackHandler(BaseCallbackHandler):
             if content:
                 context_chars += len(content)
 
-        self._retrieval_docs.record(doc_count)
-        self._retrieval_context_chars.record(context_chars)
+        self._retrieval_docs.record(doc_count, attrs)
+        self._retrieval_context_chars.record(context_chars, attrs)
 
     def record_tool_call(self, tool_name: str | None = None) -> None:
         attrs = {"tool.name": tool_name} if tool_name else {}
-        self._tool_calls.add(1, attrs)
+        self._tool_calls.add(1, self._with_run_id(attrs))
+
+    def _with_run_id(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
+        run_id = _current_run_id()
+        if not run_id:
+            return attrs
+        merged = dict(attrs)
+        merged["app.run_id"] = run_id
+        return merged
 
 
 @dataclass
@@ -387,9 +406,13 @@ class ObservabilityManager:
 
         @contextmanager
         def _span():
-            with tracer.start_as_current_span("agent.run") as span:
-                span.set_attribute("app.run_id", run_id)
-                yield span
+            token = _RUN_ID_CONTEXT.set(run_id)
+            try:
+                with tracer.start_as_current_span("agent.run") as span:
+                    span.set_attribute("app.run_id", run_id)
+                    yield span
+            finally:
+                _RUN_ID_CONTEXT.reset(token)
 
         return _span()
 
@@ -511,7 +534,7 @@ def init_observability() -> ObservabilityManager:
             from opentelemetry.sdk.metrics import MeterProvider
             from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
             from opentelemetry.sdk.resources import Resource, SERVICE_NAME
-            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace import TracerProvider, SpanProcessor
             from opentelemetry.sdk.trace.export import BatchSpanProcessor
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("OpenTelemetry SDK unavailable: %s", exc)
@@ -536,7 +559,23 @@ def init_observability() -> ObservabilityManager:
             default=endpoint.startswith("http://"),
         )
 
+        class RunIdSpanProcessor(SpanProcessor):
+            def on_start(self, span: Any, parent_context: Any | None = None) -> None:
+                run_id = _current_run_id()
+                if run_id:
+                    span.set_attribute("app.run_id", run_id)
+
+            def on_end(self, span: Any) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+            def force_flush(self, timeout_millis: int | None = None) -> bool:
+                return True
+
         tracer_provider = TracerProvider(resource=resource)
+        tracer_provider.add_span_processor(RunIdSpanProcessor())
         trace_exporter = OTLPSpanExporter(endpoint=endpoint, insecure=insecure)
         tracer_provider.add_span_processor(BatchSpanProcessor(trace_exporter))
         trace.set_tracer_provider(tracer_provider)
