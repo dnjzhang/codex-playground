@@ -90,6 +90,34 @@ def fetch_latest_distribution(
     return None, None
 
 
+def fetch_latest_close_yfinance(
+    yf_symbol: str,
+    max_retries: int = YFINANCE_MAX_RETRIES,
+    backoff_seconds: float = YFINANCE_BACKOFF_SECONDS,
+) -> Tuple[Optional[str], Optional[float]]:
+    for attempt in range(max_retries):
+        if attempt > 0:
+            delay = backoff_seconds * (2 ** (attempt - 1))
+            time.sleep(delay)
+        try:
+            history = yf.Ticker(yf_symbol).history(period="14d")
+            if history is None or history.empty:
+                return None, None
+            history = history.sort_index()
+            price_date = pd.Timestamp(history.index[-1]).date().isoformat()
+            price_close = float(history["Close"].iloc[-1])
+            return price_date, price_close
+        except Exception as exc:
+            LOGGER.warning(
+                "yfinance price failed for %s (attempt %d/%d): %s",
+                yf_symbol,
+                attempt + 1,
+                max_retries,
+                exc,
+            )
+    return None, None
+
+
 def format_float(value: Optional[float], decimals: int) -> str:
     if value is None:
         return ""
@@ -125,6 +153,14 @@ def build_rows(tickers: Iterable[str]) -> List[dict]:
                 stooq_symbol,
                 exc,
             )
+
+        if price_date is None:
+            price_date, price_close = fetch_latest_close_yfinance(yf_symbol)
+            if price_date is None:
+                LOGGER.warning(
+                    "No yfinance price data for %s (symbol %s)", ticker, yf_symbol
+                )
+            time.sleep(YFINANCE_PAUSE_SECONDS)
 
         distribution_date, distribution_amount = fetch_latest_distribution(yf_symbol)
         if distribution_date is None:

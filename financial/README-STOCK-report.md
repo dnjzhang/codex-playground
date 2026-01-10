@@ -39,5 +39,6 @@ The default output file name is `portfolio_report.csv`.
 - `last_distribution_date`
 - `last_distribution_per_share`
 
-If a ticker has no price or distribution data, the row is still written with
-blank fields and a warning is logged.
+If Stooq has no price data (common for mutual funds), the tool falls back to
+yfinance price history. If a ticker has no price or distribution data, the row
+is still written with blank fields and a warning is logged.
