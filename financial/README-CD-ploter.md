@@ -15,4 +15,3 @@ Quick script to visualize total CD amounts maturing per month from a CSV.
 ## Tips
 - Provide your own CSV in the same format: first column is a date, fifth column is the amount (e.g., `$10,000`).
 - To save the figure instead of showing it, modify the script to call `plt.savefig('cd_maturity.png')` before `plt.show()`.
-
