@@ -58,10 +58,17 @@ interface LogRow {
   attributes: string;
 }
 
+const OTEL_DIR = "otel-out";
+
+function buildOtelUrl(filename: string): string {
+  const base = new URL(".", window.location.href);
+  return new URL(`${OTEL_DIR}/${filename}`, base).toString();
+}
+
 const FILES = {
-  traces: "./otel-out/traces.json",
-  metrics: "./otel-out/metrics.json",
-  logs: "./otel-out/logs.json",
+  traces: buildOtelUrl("traces.json"),
+  metrics: buildOtelUrl("metrics.json"),
+  logs: buildOtelUrl("logs.json"),
 };
 
 const TABLE_CONFIG = {
