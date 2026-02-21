@@ -65,8 +65,17 @@ def format_number(value: Optional[float], decimals: int = 6) -> str:
 def read_portfolio_csv(path: str) -> tuple[List[dict], Sequence[str]]:
     with open(path, "r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames or []
-        rows = [dict(row) for row in reader]
+        raw_fieldnames = reader.fieldnames or []
+        fieldnames = [
+            name.strip() if isinstance(name, str) else name for name in raw_fieldnames
+        ]
+        rows = []
+        for raw_row in reader:
+            row = {
+                key.strip() if isinstance(key, str) else key: value
+                for key, value in raw_row.items()
+            }
+            rows.append(row)
     return rows, fieldnames
 
 
