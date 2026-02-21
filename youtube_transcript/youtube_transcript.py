@@ -48,8 +48,19 @@ def fetch_captions_transcript(url):
     if not video_id:
         raise ValueError("Unable to extract video ID for captions fallback.")
 
+    # youtube-transcript-api changed from class-level methods to instance methods.
+    # Support both old and new versions.
+    api = YouTubeTranscriptApi()
+
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        if hasattr(api, "list"):
+            transcript_list = api.list(video_id)
+        elif hasattr(api, "list_transcripts"):
+            transcript_list = api.list_transcripts(video_id)
+        else:
+            raise RuntimeError(
+                "Unsupported youtube-transcript-api version: no list/list_transcripts method."
+            )
     except (TranscriptsDisabled, VideoUnavailable) as exc:
         raise RuntimeError("Captions are not available for this video.") from exc
 
@@ -62,7 +73,21 @@ def fetch_captions_transcript(url):
             transcript = next(iter(transcript_list))
 
     entries = transcript.fetch()
-    return "\n".join(entry["text"] for entry in entries)
+
+    # Older versions return list[dict], newer versions return snippet objects.
+    lines = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            text = entry.get("text", "")
+        else:
+            text = getattr(entry, "text", "")
+        if text:
+            lines.append(text)
+
+    if not lines:
+        raise RuntimeError("Captions fetch succeeded but returned no transcript text.")
+
+    return "\n".join(lines)
 
 
 def process_youtube_video(url, base_dir, filename=None):
