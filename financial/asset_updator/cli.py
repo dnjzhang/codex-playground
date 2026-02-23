@@ -68,7 +68,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     if args.inplace:
         timestamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        backup_path = Path(f"{input_path}-{timestamp}")
+        backup_name = f"{input_path.stem}-{timestamp}{input_path.suffix}"
+        backup_path = input_path.with_name(backup_name)
         shutil.copy2(input_path, backup_path)
 
     rows, fieldnames = read_portfolio_csv(str(input_path))

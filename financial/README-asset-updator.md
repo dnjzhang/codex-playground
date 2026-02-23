@@ -7,9 +7,12 @@ Update a Google Sheets/Excel portfolio export with the latest prices and dividen
 - Install: `pip install -r requirements.txt`
 
 ## Run (from repo root or `financial/`)
+- `./asset_updator.sh --in portfolio.csv --out portfolio_updated.csv`
+- `./asset_updator.sh --in portfolio.csv --inplace`
+  - Creates a backup alongside the input file as `<input-name>-<YYYY-MM-DD_HHMMSS>.csv`.
 - `python -m asset_updator.cli --in portfolio.csv --out portfolio_updated.csv`
 - `python -m asset_updator.cli --in portfolio.csv --inplace`
-  - Creates a backup alongside the input file with a timestamp suffix.
+  - Creates a backup alongside the input file as `<input-name>-<YYYY-MM-DD_HHMMSS>.csv`.
 
 ## Example Input
 ```csv
