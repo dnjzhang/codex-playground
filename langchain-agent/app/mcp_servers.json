@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "playwright": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--browser=chrome"],
+      "env": {
+        "NPM_CONFIG_CACHE": "/tmp/langchain-agent-npm-cache"
+      }
+    }
+  }
+}

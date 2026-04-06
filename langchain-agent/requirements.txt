@@ -1,0 +1,7 @@
+deepagents==0.4.12
+langchain==1.2.15
+langchain-mcp-adapters==0.2.2
+langchain-ollama==1.0.1
+langgraph==1.1.6
+pytest==9.0.2
+python-dotenv==1.2.2
